@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Metrics computation for WOSAC realism evaluation. Adapted from
 https://github.com/waymo-research/waymo-open-dataset/blob/master/src/waymo_open_dataset/wdl_limited/sim_agents_metrics/metrics.py
 """

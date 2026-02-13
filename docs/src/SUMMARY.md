@@ -5,6 +5,7 @@
 # Documentation
 
 - [Getting started](getting-started.md)
+- [Cluster headless setup](cluster-headless-setup.md)
 - [Training agents](train.md)
 - [Interact with agents](interact-with-agents.md)
 - [Simulator](simulator.md)
