@@ -5,7 +5,7 @@
 # Documentation
 
 - [Getting started](getting-started.md)
-- [Cluster headless setup](cluster-headless-setup.md)
+- [Cluster headless setup](custom/cluster-headless-setup.md)
 - [Training agents](train.md)
 - [Interact with agents](interact-with-agents.md)
 - [Simulator](simulator.md)
@@ -20,6 +20,7 @@
 
 - [Evaluation overview](evaluation.md)
 - [WOSAC](wosac.md)
+- [WOSAC eval report (2026-02-13)](custom/wosac-eval-report-2026-02-13.md)
 
 # Blog
 
