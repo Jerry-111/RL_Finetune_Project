@@ -1,3 +1,6 @@
 [submodule "external/pyxodr"]
 	path = external/pyxodr
 	url = https://github.com/mpragnay/pyxodr.git
+[submodule "third_party/RAP"]
+	path = third_party/RAP
+	url = https://github.com/vita-epfl/RAP.git
