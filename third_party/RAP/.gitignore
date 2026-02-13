@@ -1,0 +1,15 @@
+.cache
+.nv
+.config
+exp/*
+*.pyc
+*.egg-info
+scripts/
+data/
+metric_cache
+cache
+wandb
+*.jpg
+*.ckpt
+MySubmission
+*.json
