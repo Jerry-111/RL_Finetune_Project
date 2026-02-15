@@ -219,6 +219,39 @@ python minimal_rap_bridge/compare_native_video_to_rap.py \
   --sample-every 5
 ```
 
+### Known-Good Example (ego359, captured, no lateral flip)
+
+This was a successful apples-to-apples sanity check using:
+- native video: `/tmp/pd_native_vs_rap/native_agent.mp4`
+- RAP frames: `/tmp/pd_native_vs_rap/rap_frames_ego359_noflip_captured`
+
+```bash
+./.venv-pufferdrive-rap/bin/python minimal_rap_bridge/compare_native_video_to_rap.py \
+  --native-video /tmp/pd_native_vs_rap/native_agent.mp4 \
+  --rap-dir /tmp/pd_native_vs_rap/rap_frames_ego359_noflip_captured \
+  --camera CAM_F0 \
+  --out-dir /tmp/pd_native_vs_rap/compare_ego359_noflip_captured \
+  --frame-offset 0 \
+  --sample-every 1 \
+  --max-samples 27
+```
+
+Outputs:
+- `/tmp/pd_native_vs_rap/compare_ego359_noflip_captured/pairs` (per-frame side-by-sides)
+- `/tmp/pd_native_vs_rap/compare_ego359_noflip_captured/overview.jpg`
+- `/tmp/pd_native_vs_rap/compare_ego359_noflip_captured/metrics.csv`
+
+### MVP Limitations (important)
+
+- Policy mismatch (motion source):
+  - Native `./visualize` advances with policy inference each step (`forward(net, obs) -> actions`, then step).
+  - This bridge does not run the native policy path; it advances with `env.step(actions)` using neutral or replayed actions/states.
+  - Expect traffic differences to grow over time even if frame 0 matches well.
+- Camera mismatch:
+  - Native `--view agent` is a chase camera.
+  - RAP `CAM_F0` is a fixed sensor-style camera with its own extrinsics/intrinsics.
+  - Use native-vs-RAP comparisons for geometry/identity sanity, not pixel-accurate parity.
+
 Outputs:
 - `/tmp/pd_rap_native_compare/pairs/`
 - `/tmp/pd_rap_native_compare/overview.jpg`

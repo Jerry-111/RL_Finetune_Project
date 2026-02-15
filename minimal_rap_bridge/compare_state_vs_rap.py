@@ -105,6 +105,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--camera-yaw-fixed-rad", type=float, default=0.0)
     parser.add_argument(
+        "--flip-lateral-axis",
+        action="store_true",
+        help="Flip Y axis (and yaw sign) before feeding RAP renderer to match native left/right orientation",
+    )
+    parser.add_argument(
         "--show-native-window",
         action="store_true",
         help="Call Drive.render() each step for manual native inspection (requires display)",
@@ -277,6 +282,8 @@ def main() -> None:
             print("Replay mode: step_neutral_actions")
         if args.show_native_window and args.replay_captured:
             print("[warn] --show-native-window is less meaningful with --replay-captured")
+        lock_ego_slot = bool(args.replay_captured and args.replay_source == "ground_truth")
+        print(f"Ego slot lock: {lock_ego_slot}")
 
         fieldnames = [
             "frame",
@@ -310,6 +317,7 @@ def main() -> None:
             clip_bound=static_clip_bound,
             ego_x=float(state_ref["x"][current_ego_idx]),
             ego_y=float(state_ref["y"][current_ego_idx]),
+            flip_lateral_axis=args.flip_lateral_axis,
         )
         print(f"Static boundary features: {len(static_map_features_preview)}")
 
@@ -320,12 +328,13 @@ def main() -> None:
                 apply_ground_truth_headings_to_state(state, t, gt_heading_lookup)
             else:
                 state = env.get_global_agent_state()
-            current_ego_idx = resolve_ego_index_by_id(
-                state,
-                ego_id=ego_id,
-                preferred_fallback=current_ego_idx,
-                last_ego_xy=(last_ego_x, last_ego_y),
-            )
+            if not lock_ego_slot:
+                current_ego_idx = resolve_ego_index_by_id(
+                    state,
+                    ego_id=ego_id,
+                    preferred_fallback=current_ego_idx,
+                    last_ego_xy=(last_ego_x, last_ego_y),
+                )
 
             if np.isfinite(state["x"][current_ego_idx]) and np.isfinite(state["y"][current_ego_idx]) and np.isfinite(
                 state["heading"][current_ego_idx]
@@ -348,6 +357,7 @@ def main() -> None:
                 clip_bound=static_clip_bound,
                 ego_x=ego_x,
                 ego_y=ego_y,
+                flip_lateral_axis=args.flip_lateral_axis,
             )
             scenario = make_scenario(
                 state=state,
@@ -357,6 +367,7 @@ def main() -> None:
                 assumed_height=args.assumed_height,
                 agent_radius=args.agent_radius,
                 ego_heading=camera_yaw,
+                flip_lateral_axis=args.flip_lateral_axis,
             )
             rendered = renderer.observe(scenario)
             counts = get_nonzero_counts(rendered)

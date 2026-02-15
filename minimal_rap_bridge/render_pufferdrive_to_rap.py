@@ -60,6 +60,7 @@ class BridgeConfig:
     ego_select_mode: str
     camera_yaw_mode: str
     camera_yaw_fixed_rad: float
+    flip_lateral_axis: bool
 
 
 @dataclass
@@ -252,6 +253,11 @@ def parse_args() -> BridgeConfig:
         default=0.0,
         help="Camera yaw (rad) when --camera-yaw-mode fixed",
     )
+    parser.add_argument(
+        "--flip-lateral-axis",
+        action="store_true",
+        help="Flip Y axis (and yaw sign) before feeding RAP renderer to match native left/right orientation",
+    )
     args = parser.parse_args()
     cameras = [c.strip() for c in args.cameras.split(",") if c.strip()]
     if not cameras:
@@ -285,6 +291,7 @@ def parse_args() -> BridgeConfig:
         ego_select_mode=args.ego_select_mode,
         camera_yaw_mode=args.camera_yaw_mode,
         camera_yaw_fixed_rad=args.camera_yaw_fixed_rad,
+        flip_lateral_axis=args.flip_lateral_axis,
     )
 
 
@@ -377,6 +384,7 @@ def build_boundary_map_features_static(
     clip_bound: float = 600.0,
     ego_x: float = 0.0,
     ego_y: float = 0.0,
+    flip_lateral_axis: bool = False,
 ) -> Dict[str, Dict[str, np.ndarray]]:
     """Build dense static-style map_features in ego-relative coordinates."""
     features: Dict[str, Dict[str, np.ndarray]] = {}
@@ -387,6 +395,8 @@ def build_boundary_map_features_static(
         seg = np.array(poly_abs, dtype=np.float32) - ego_xy
         if seg.shape[0] < 2 or not np.isfinite(seg).all():
             continue
+        if flip_lateral_axis:
+            seg[:, 1] = -seg[:, 1]
         # Keep "full static" behavior but cap coordinates to avoid pathological
         # projections that can overflow OpenCV clipLine integer parsing.
         seg = np.clip(seg, -bound, bound)
@@ -399,6 +409,8 @@ def build_boundary_map_features_static(
             seg = np.array(poly_abs, dtype=np.float32) - ego_xy
             if seg.shape[0] < 2 or not np.isfinite(seg).all():
                 continue
+            if flip_lateral_axis:
+                seg[:, 1] = -seg[:, 1]
             seg = np.clip(seg, -bound, bound)
             # RAP renderer checks `'LANE' in ftype` and consumes key `'polygon'`.
             features[f"lane_{lane_idx:05d}"] = {"type": "LANE_CENTER", "polygon": seg}
@@ -587,6 +599,8 @@ def compute_camera_yaw(raw_heading: float, cfg: BridgeConfig) -> float:
         yaw = wrap_angle_rad(cfg.camera_yaw_fixed_rad)
     else:
         yaw = wrap_angle_rad(raw_heading)
+    if getattr(cfg, "flip_lateral_axis", False):
+        yaw = wrap_angle_rad(-yaw)
     return yaw
 
 
@@ -596,6 +610,7 @@ def build_anns_from_state(
     include_ego_box: bool,
     assumed_height: float,
     agent_radius: float | None,
+    flip_lateral_axis: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Create RAP anns fields from PufferDrive global state."""
     idxs = valid_agent_indices(state)
@@ -612,6 +627,8 @@ def build_anns_from_state(
         rel_x = float(state["x"][i] - ego_x)
         rel_y = float(state["y"][i] - ego_y)
         rel_z = float(state["z"][i] - ego_z)
+        if flip_lateral_axis:
+            rel_y = -rel_y
         if agent_radius is not None and agent_radius > 0.0:
             if (rel_x * rel_x + rel_y * rel_y) > agent_radius * agent_radius:
                 continue
@@ -630,6 +647,8 @@ def build_anns_from_state(
             continue
         seen_keys.add(key)
         yaw = float(state["heading"][i])  # keep world yaw, matching RAP metadata convention
+        if flip_lateral_axis:
+            yaw = -yaw
         boxes.append([rel_x, rel_y, rel_z, length, width, float(assumed_height), yaw])
         names.append("vehicle")
 
@@ -646,6 +665,7 @@ def make_scenario(
     assumed_height: float,
     agent_radius: float | None,
     ego_heading: float,
+    flip_lateral_axis: bool = False,
 ) -> Dict:
     gt_boxes_world, gt_names = build_anns_from_state(
         state=state,
@@ -653,6 +673,7 @@ def make_scenario(
         include_ego_box=include_ego_box,
         assumed_height=assumed_height,
         agent_radius=agent_radius,
+        flip_lateral_axis=flip_lateral_axis,
     )
     return {
         "ego_heading": float(ego_heading),
@@ -921,8 +942,11 @@ def run_bridge(cfg: BridgeConfig) -> None:
         print(
             f"Camera yaw mode: {cfg.camera_yaw_mode} (fixed_rad={cfg.camera_yaw_fixed_rad:.3f})"
         )
+        print(f"Flip lateral axis: {cfg.flip_lateral_axis}")
         print(f"Radius settings: map_radius={cfg.map_radius:.1f}m, agent_radius={cfg.agent_radius}")
         print(f"Cameras: {cfg.cameras}")
+        lock_ego_slot = bool(cfg.replay_mode and cfg.replay_source == "ground_truth")
+        print(f"Ego slot lock: {lock_ego_slot}")
         qa = init_qa_accumulator(cfg.cameras)
         map_bin_path = infer_map_bin_path(env, cfg.map_dir)
         lane_polylines_abs: List[np.ndarray] = []
@@ -943,6 +967,7 @@ def run_bridge(cfg: BridgeConfig) -> None:
             clip_bound=static_clip_bound,
             ego_x=last_ego_x,
             ego_y=last_ego_y,
+            flip_lateral_axis=cfg.flip_lateral_axis,
         )
         print(f"Static boundary features: {len(static_map_features_preview)}")
 
@@ -953,12 +978,13 @@ def run_bridge(cfg: BridgeConfig) -> None:
                 apply_ground_truth_headings_to_state(state, t, gt_heading_lookup)
             else:
                 state = env.get_global_agent_state()
-            current_ego_idx = resolve_ego_index_by_id(
-                state,
-                ego_id=ego_id,
-                preferred_fallback=current_ego_idx,
-                last_ego_xy=(last_ego_x, last_ego_y),
-            )
+            if not lock_ego_slot:
+                current_ego_idx = resolve_ego_index_by_id(
+                    state,
+                    ego_id=ego_id,
+                    preferred_fallback=current_ego_idx,
+                    last_ego_xy=(last_ego_x, last_ego_y),
+                )
 
             if np.isfinite(state["x"][current_ego_idx]) and np.isfinite(state["y"][current_ego_idx]) and np.isfinite(
                 state["heading"][current_ego_idx]
@@ -982,6 +1008,7 @@ def run_bridge(cfg: BridgeConfig) -> None:
                 clip_bound=static_clip_bound,
                 ego_x=ego_x,
                 ego_y=ego_y,
+                flip_lateral_axis=cfg.flip_lateral_axis,
             )
             scenario = make_scenario(
                 state=state,
@@ -991,6 +1018,7 @@ def run_bridge(cfg: BridgeConfig) -> None:
                 assumed_height=cfg.assumed_height,
                 agent_radius=cfg.agent_radius,
                 ego_heading=camera_yaw,
+                flip_lateral_axis=cfg.flip_lateral_axis,
             )
             rendered = renderer.observe(scenario)
             save_frame_images(cfg.out_dir, t, rendered)

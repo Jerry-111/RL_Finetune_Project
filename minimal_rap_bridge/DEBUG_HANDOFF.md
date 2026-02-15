@@ -166,3 +166,85 @@ Try `8,10,12,16,20` if ego ends up too far front/back.
 ### Files Changed
 - `minimal_rap_bridge/render_pufferdrive_to_rap.py`
 - `minimal_rap_bridge/compare_state_vs_rap.py`
+
+## Update 2026-02-14 (lateral orientation fix)
+
+### New Finding
+- Native-vs-RAP comparisons showed a consistent left/right inversion (ego lane side mirrored).
+- Quantitative sanity check across 27 frames showed native alignment improved when RAP output was horizontally mirrored.
+
+### Fix Applied
+- Added `--flip-lateral-axis` flag to:
+  - `minimal_rap_bridge/render_pufferdrive_to_rap.py`
+  - `minimal_rap_bridge/compare_state_vs_rap.py`
+- When enabled, bridge now flips lateral geometry consistently before RAP rendering:
+  - map features: `y -> -y`
+  - agent boxes: `rel_y -> -rel_y`, `yaw -> -yaw`
+  - camera yaw: `ego_heading -> -ego_heading`
+
+### Repro (native alignment test)
+- RAP render:
+  - `... render_pufferdrive_to_rap.py ... --ego-agent-index 359 --flip-lateral-axis`
+- Compare:
+  - `... compare_native_video_to_rap.py --native-video /tmp/pd_native_vs_rap/native_agent.mp4 --rap-dir /tmp/pd_native_vs_rap/rap_frames_ego359_flip ...`
+
+## Update 2026-02-15 (frame-6 ego jump root cause)
+
+### New Finding
+- The observed abrupt side switch around frame 6 is a replay-source artifact, not just lateral flip:
+  - with `--replay-source ground_truth`, selected ego slot/index (`359`) becomes invalid from frame 6 onward for this scene.
+  - previous behavior re-resolved ego by duplicate id and jumped to another agent index (`0`), causing camera/side discontinuity.
+
+### Fix Applied
+- For `ground_truth` replay, ego slot is now locked (`Ego slot lock: True`) and no per-frame ego re-resolution is performed.
+- If locked ego becomes invalid, camera pose is anchored to last valid ego pose instead of switching agents.
+
+### Practical Recommendation
+- For direct native-video comparison on this map, use:
+  - `--replay-source captured --flip-lateral-axis`
+- Reason:
+  - `captured` keeps ego slot `359` valid and continuous across all tested frames;
+  - `ground_truth` for this ego track ends early, so long-horizon native alignment is inherently unstable.
+
+## Update 2026-02-15 (successful native-vs-RAP compare: noflip + captured)
+
+### What Worked
+This run produced a clean, stable side-by-side comparison between:
+- Native PufferDrive `./visualize` agent video (already exported): `/tmp/pd_native_vs_rap/native_agent.mp4`
+- RAP bridge frames rendered from PufferDrive with `captured` replay (no lateral flip): `/tmp/pd_native_vs_rap/rap_frames_ego359_noflip_captured`
+
+Command:
+```bash
+./.venv-pufferdrive-rap/bin/python minimal_rap_bridge/compare_native_video_to_rap.py \
+  --native-video /tmp/pd_native_vs_rap/native_agent.mp4 \
+  --rap-dir /tmp/pd_native_vs_rap/rap_frames_ego359_noflip_captured \
+  --camera CAM_F0 \
+  --out-dir /tmp/pd_native_vs_rap/compare_ego359_noflip_captured \
+  --frame-offset 0 \
+  --sample-every 1 \
+  --max-samples 27
+```
+
+Outputs:
+- pairs: `/tmp/pd_native_vs_rap/compare_ego359_noflip_captured/pairs`
+- overview: `/tmp/pd_native_vs_rap/compare_ego359_noflip_captured/overview.jpg`
+- metrics: `/tmp/pd_native_vs_rap/compare_ego359_noflip_captured/metrics.csv`
+
+### Interpretation Notes
+- Use this primarily to validate *ego identity* + *left/right* + *gross neighborhood geometry*.
+- Do not expect mid-horizon actor interactions to match perfectly unless the motion source is matched (see MVP limitations below).
+
+### MVP Limitations (current bridge)
+- Motion source mismatch:
+  - Native `./visualize` is policy closed-loop: per-step `forward(net, obs) -> actions`, then `c_step`.
+  - Bridge is not running that policy path; it uses `env.step(actions)` with either neutral actions or replayed actions/states.
+  - Result: even with frame-0 alignment, neighbor trajectories can diverge by frame ~10-30.
+- Camera mismatch is expected:
+  - Native `--view agent` is a chase camera.
+  - RAP `CAM_F0` is a fixed sensor-style camera model.
+  - Match on “what is left/right/front” and “which cars exist”, not pixel-parity.
+- Identity caveats in PufferDrive exports:
+  - `id` is not reliably unique; slot-index stability is required for per-agent lookups.
+- Map fidelity differences:
+  - RAP currently uses road edges + parsed lane/line polylines; native draws richer road surface geometry.
+  - Expect differences in how lanes/shoulders/edges look, even if geometry is roughly aligned.
