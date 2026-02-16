@@ -141,6 +141,8 @@ class Drive(pufferlib.PufferEnv):
                 f"num_maps ({num_maps}) exceeds available maps in directory ({available_maps}). Please reduce num_maps or add more maps to resources/drive/binaries."
             )
         self.max_controlled_agents = int(max_controlled_agents)
+        self._native_policy_initialized = False
+        self._native_policy_path = None
 
         # Iterate through all maps to count total agents that can be initialized for each map
         agent_offsets, map_ids, num_envs = binding.shared(
@@ -210,6 +212,11 @@ class Drive(pufferlib.PufferEnv):
 
         """
         self.tick = 0
+        had_native_policy = self._native_policy_initialized
+        policy_path = self._native_policy_path
+        if had_native_policy:
+            binding.vec_policy_close(self.c_envs)
+            self._native_policy_initialized = False
         binding.vec_close(self.c_envs)
         agent_offsets, map_ids, num_envs = binding.shared(
             num_agents=self.num_agents,
@@ -267,11 +274,47 @@ class Drive(pufferlib.PufferEnv):
 
         binding.vec_reset(self.c_envs, seed)
         self.terminals[:] = 1
+        if had_native_policy and policy_path is not None:
+            binding.vec_policy_init(self.c_envs, policy_path)
+            self._native_policy_initialized = True
 
     def step(self, actions):
         self.terminals[:] = 0
         self.actions[:] = actions
         binding.vec_step(self.c_envs)
+        self.tick += 1
+        info = []
+        if self.tick % self.report_interval == 0:
+            log = binding.vec_log(self.c_envs, self.num_agents)
+            if log:
+                info.append(log)
+
+        if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
+            self.resample_maps()
+
+        return (self.observations, self.rewards, self.terminals, self.truncations, info)
+
+    def init_native_policy(self, policy_path="resources/drive/puffer_drive_weights.bin"):
+        if self._action_type_flag != 0:
+            raise ValueError("Native policy runner currently supports discrete action_type only")
+        if self._native_policy_initialized:
+            binding.vec_policy_close(self.c_envs)
+        binding.vec_policy_init(self.c_envs, str(policy_path))
+        self._native_policy_initialized = True
+        self._native_policy_path = str(policy_path)
+
+    def close_native_policy(self):
+        if self._native_policy_initialized:
+            binding.vec_policy_close(self.c_envs)
+            self._native_policy_initialized = False
+            self._native_policy_path = None
+
+    def step_native_policy(self):
+        if not self._native_policy_initialized:
+            raise RuntimeError("Native policy not initialized. Call init_native_policy(policy_path) first.")
+
+        self.terminals[:] = 0
+        binding.vec_policy_step(self.c_envs)
         self.tick += 1
         info = []
         if self.tick % self.report_interval == 0:
@@ -388,6 +431,7 @@ class Drive(pufferlib.PufferEnv):
         binding.vec_render(self.c_envs, 0)
 
     def close(self):
+        self.close_native_policy()
         binding.vec_close(self.c_envs)
 
 

@@ -248,3 +248,94 @@ Outputs:
 - Map fidelity differences:
   - RAP currently uses road edges + parsed lane/line polylines; native draws richer road surface geometry.
   - Expect differences in how lanes/shoulders/edges look, even if geometry is roughly aligned.
+
+## Update 2026-02-15 (trimmed baseline script for next iteration)
+
+### Added
+- New script: `minimal_rap_bridge/render_pufferdrive_to_rap_baseline.py`
+
+### Purpose
+- Clean starting point for future closed-loop/native-policy integration work.
+- Removes debug-heavy knobs from the main script and locks known-good assumptions:
+  - replay source fixed to `captured`
+  - lateral flip fixed to disabled
+
+### Notes
+- This script still uses current bridge stepping internals from `run_bridge(...)`.
+- It is intended as a stable base to iterate on control-path parity without carrying all prior debug options.
+
+## Update 2026-02-15 (native policy closed-loop bridge wiring)
+
+### Added
+- C binding APIs in `pufferlib/ocean/drive/binding.c`:
+  - `vec_policy_init(vec_handle, policy_path)`
+  - `vec_policy_step(vec_handle)` (runs `forward` then `c_step`)
+  - `vec_policy_close(vec_handle)`
+- Python wrappers in `pufferlib/ocean/drive/drive.py`:
+  - `init_native_policy(...)`
+  - `step_native_policy()`
+  - `close_native_policy()`
+- Render control switch in `minimal_rap_bridge/render_pufferdrive_to_rap.py`:
+  - `--control-source neutral_actions|native_policy`
+  - `--policy-path ...`
+- Baseline script switch in `minimal_rap_bridge/render_pufferdrive_to_rap_baseline.py`:
+  - `--control-source captured_replay|native_policy`
+
+### Validation Snapshot
+- Native-policy path smoke test succeeds (1 frame RAP render completed).
+- Captured replay path still reproduces intermittent allocator instability in this environment (`malloc(): unaligned tcache chunk detected`).
+
+## Update 2026-02-15 (clean state-vs-RAP baseline script)
+
+### Added
+- New script: `minimal_rap_bridge/compare_state_vs_rap_baseline.py`
+
+### Purpose
+- Clean panel-based comparator for future iteration with minimal knobs.
+- Supports both:
+  - `--control-source captured_replay`
+  - `--control-source native_policy`
+
+### Notes
+- Keeps trimmed conventions (no lateral flip path in this baseline).
+- Intended to replace ad-hoc edits to `compare_state_vs_rap.py` during closed-loop alignment debugging.
+
+## Update 2026-02-15 (native-policy segfault fix for multi-env vec)
+
+### Root Cause
+- In `vec_policy_init`, multiple `DriveNet` instances were initialized from a shared `Weights` buffer without resetting `weights->idx` per env.
+- For multi-env vec setups (e.g., `num_agents=32` splitting across envs), second/subsequent nets received invalid weight slices, causing segfault on first policy step.
+
+### Fix
+- In `pufferlib/ocean/drive/binding.c`, reset `rt->weights->idx = 0` before each `init_drivenet(...)` call.
+
+### Verification
+- `Drive.step_native_policy()` repeated steps now run with `num_agents=32`.
+- `render_pufferdrive_to_rap_baseline.py` native-policy mode runs 20 frames successfully.
+- `compare_state_vs_rap_baseline.py` native-policy mode runs multi-camera smoke successfully.
+
+## Update 2026-02-15 (single pipeline runner script)
+
+### Added
+- `minimal_rap_bridge/run_native_policy_pipeline.sh`
+
+### What it wraps
+1. `compare_state_vs_rap_baseline.py` (BEV+RAP panels)
+2. `render_pufferdrive_to_rap_baseline.py` (pure RAP frames)
+3. `make_rap_strip_video.py` (stitched horizontal RAP L/F/R video)
+4. `compare_native_video_to_rap.py` (native-vs-RAP matching panels/metrics)
+
+### Action Discrepancy Tools Added
+- `minimal_rap_bridge/log_native_policy_actions_reference.py`
+  - logs per-transition native-policy actions from a no-render reference loop.
+- `minimal_rap_bridge/compare_action_logs.py`
+  - compares reference-vs-RAP action logs (`ego_action`, `action_sum`, `action_crc32`, etc.).
+- `minimal_rap_bridge/run_native_policy_pipeline.sh` now runs action logging/comparison by default (disable with `--skip-action-check`).
+
+### Parity Controls Added
+- Pass-through controls were added to reduce ego mismatch risk:
+  - `--control-mode`
+  - `--init-mode`
+  - `--ego-select-mode`
+  - `--ego-agent-index`
+- Pipeline defaults now use `control_vehicles` + `create_all_valid` (closer to native visualize defaults).

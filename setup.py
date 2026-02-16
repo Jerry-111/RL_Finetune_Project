@@ -14,16 +14,21 @@ import shutil
 import sys
 
 from setuptools.command.build_ext import build_ext
-from torch.utils import cpp_extension
-from torch.utils.cpp_extension import (
-    CppExtension,
-    CUDAExtension,
-)
+NO_TRAIN = os.getenv("NO_TRAIN", "0") == "1"
+if not NO_TRAIN:
+    from torch.utils import cpp_extension
+    from torch.utils.cpp_extension import (
+        CppExtension,
+        CUDAExtension,
+    )
+else:
+    cpp_extension = None
+    CppExtension = None
+    CUDAExtension = None
 
 # Build with DEBUG=1 to enable debug symbols
 DEBUG = os.getenv("DEBUG", "0") == "1"
 NO_OCEAN = os.getenv("NO_OCEAN", "0") == "1"
-NO_TRAIN = os.getenv("NO_TRAIN", "0") == "1"
 
 # Build raylib for your platform
 RAYLIB_URL = "https://github.com/raysan5/raylib/releases/download/5.5/"
@@ -220,14 +225,19 @@ class CBuildExt(build_ext):
         super().run(*args, **kwargs)
 
 
-class TorchBuildExt(cpp_extension.BuildExtension):
-    def run(self):
-        self.extensions = [e for e in self.extensions if e.name == "pufferlib._C"]
-        super().run()
+if cpp_extension is not None:
+    class TorchBuildExt(cpp_extension.BuildExtension):
+        def run(self):
+            self.extensions = [e for e in self.extensions if e.name == "pufferlib._C"]
+            super().run()
+else:
+    class TorchBuildExt(build_ext):
+        def run(self):
+            self.extensions = []
 
 
 RAYLIB_A = f"{RAYLIB_NAME}/lib/libraylib.a"
-INCLUDE = [numpy.get_include(), "raylib/include", f"{BOX2D_NAME}/include", f"{BOX2D_NAME}/src"]
+INCLUDE = [numpy.get_include(), "raylib/include", "pufferlib/extensions", f"{BOX2D_NAME}/include", f"{BOX2D_NAME}/src"]
 extension_kwargs = dict(
     include_dirs=INCLUDE,
     extra_compile_args=extra_compile_args,

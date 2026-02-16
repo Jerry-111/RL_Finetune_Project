@@ -1,7 +1,15 @@
-#include "drive.h"
+#include <Python.h>
+#include "drivenet.h"
 #define Env Drive
 #define MY_SHARED
 #define MY_PUT
+static PyObject *vec_policy_init(PyObject *self, PyObject *args);
+static PyObject *vec_policy_step(PyObject *self, PyObject *args);
+static PyObject *vec_policy_close(PyObject *self, PyObject *args);
+#define MY_METHODS                                                                                                    \
+    {"vec_policy_init", vec_policy_init, METH_VARARGS, "Initialize native Drive policy runner for a vec env"},      \
+        {"vec_policy_step", vec_policy_step, METH_VARARGS, "Run native forward()+c_step() for each env in vec"},    \
+        {"vec_policy_close", vec_policy_close, METH_VARARGS, "Free native Drive policy runner for a vec env"}
 #include "../env_binding.h"
 
 static int my_put(Env *env, PyObject *args, PyObject *kwargs) {
@@ -240,4 +248,201 @@ static int my_log(PyObject *dict, Log *log) {
     assign_to_dict(dict, "speed_at_goal", log->speed_at_goal);
     // assign_to_dict(dict, "avg_displacement_error", log->avg_displacement_error);
     return 0;
+}
+
+typedef struct VecPolicyRuntime VecPolicyRuntime;
+struct VecPolicyRuntime {
+    VecEnv *vec;
+    Weights *weights;
+    DriveNet **nets;
+    int num_envs;
+    char *policy_path;
+    VecPolicyRuntime *next;
+};
+
+static VecPolicyRuntime *g_policy_runtimes = NULL;
+
+static VecPolicyRuntime *find_runtime(VecEnv *vec) {
+    VecPolicyRuntime *cur = g_policy_runtimes;
+    while (cur != NULL) {
+        if (cur->vec == vec) {
+            return cur;
+        }
+        cur = cur->next;
+    }
+    return NULL;
+}
+
+static void free_runtime_contents(VecPolicyRuntime *rt) {
+    if (rt == NULL) {
+        return;
+    }
+    if (rt->nets != NULL) {
+        for (int i = 0; i < rt->num_envs; i++) {
+            if (rt->nets[i] != NULL) {
+                free_drivenet(rt->nets[i]);
+            }
+        }
+        free(rt->nets);
+        rt->nets = NULL;
+    }
+    if (rt->weights != NULL) {
+        free(rt->weights);
+        rt->weights = NULL;
+    }
+    if (rt->policy_path != NULL) {
+        free(rt->policy_path);
+        rt->policy_path = NULL;
+    }
+    rt->num_envs = 0;
+}
+
+static void remove_runtime(VecEnv *vec) {
+    VecPolicyRuntime *prev = NULL;
+    VecPolicyRuntime *cur = g_policy_runtimes;
+    while (cur != NULL) {
+        if (cur->vec == vec) {
+            if (prev == NULL) {
+                g_policy_runtimes = cur->next;
+            } else {
+                prev->next = cur->next;
+            }
+            free_runtime_contents(cur);
+            free(cur);
+            return;
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+}
+
+static PyObject *vec_policy_init(PyObject *self, PyObject *args) {
+    if (PyTuple_Size(args) != 2) {
+        PyErr_SetString(PyExc_TypeError, "vec_policy_init requires 2 arguments: vec_handle, policy_path");
+        return NULL;
+    }
+
+    VecEnv *vec = unpack_vecenv(args);
+    if (!vec) {
+        return NULL;
+    }
+
+    PyObject *path_obj = PyTuple_GetItem(args, 1);
+    if (!PyUnicode_Check(path_obj)) {
+        PyErr_SetString(PyExc_TypeError, "policy_path must be a string");
+        return NULL;
+    }
+    const char *policy_path = PyUnicode_AsUTF8(path_obj);
+    if (policy_path == NULL) {
+        return NULL;
+    }
+
+    FILE *policy_file = fopen(policy_path, "rb");
+    if (policy_file == NULL) {
+        char msg[512];
+        snprintf(msg, sizeof(msg), "Policy file not found: %s", policy_path);
+        PyErr_SetString(PyExc_FileNotFoundError, msg);
+        return NULL;
+    }
+    fclose(policy_file);
+
+    remove_runtime(vec);
+
+    VecPolicyRuntime *rt = (VecPolicyRuntime *)calloc(1, sizeof(VecPolicyRuntime));
+    if (rt == NULL) {
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate VecPolicyRuntime");
+        return NULL;
+    }
+    rt->vec = vec;
+    rt->num_envs = vec->num_envs;
+    rt->policy_path = strdup(policy_path);
+    if (rt->policy_path == NULL) {
+        free(rt);
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate policy path");
+        return NULL;
+    }
+
+    rt->weights = load_weights((char *)policy_path);
+    if (rt->weights == NULL) {
+        free_runtime_contents(rt);
+        free(rt);
+        PyErr_SetString(PyExc_RuntimeError, "load_weights failed");
+        return NULL;
+    }
+
+    rt->nets = (DriveNet **)calloc(rt->num_envs, sizeof(DriveNet *));
+    if (rt->nets == NULL) {
+        free_runtime_contents(rt);
+        free(rt);
+        PyErr_SetString(PyExc_MemoryError, "Failed to allocate DriveNet array");
+        return NULL;
+    }
+
+    for (int i = 0; i < rt->num_envs; i++) {
+        Drive *drive = (Drive *)vec->envs[i];
+        rt->weights->idx = 0;
+        rt->nets[i] = init_drivenet(rt->weights, drive->active_agent_count, drive->dynamics_model);
+        if (rt->nets[i] == NULL) {
+            free_runtime_contents(rt);
+            free(rt);
+            PyErr_SetString(PyExc_RuntimeError, "init_drivenet failed");
+            return NULL;
+        }
+    }
+
+    rt->next = g_policy_runtimes;
+    g_policy_runtimes = rt;
+    Py_RETURN_NONE;
+}
+
+static PyObject *vec_policy_step(PyObject *self, PyObject *args) {
+    if (PyTuple_Size(args) != 1) {
+        PyErr_SetString(PyExc_TypeError, "vec_policy_step requires 1 argument: vec_handle");
+        return NULL;
+    }
+
+    VecEnv *vec = unpack_vecenv(args);
+    if (!vec) {
+        return NULL;
+    }
+
+    VecPolicyRuntime *rt = find_runtime(vec);
+    if (rt == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "Policy runtime not initialized. Call vec_policy_init first.");
+        return NULL;
+    }
+    if (rt->num_envs != vec->num_envs) {
+        PyErr_SetString(PyExc_RuntimeError, "vec size changed; reinitialize policy runtime");
+        return NULL;
+    }
+
+    for (int i = 0; i < vec->num_envs; i++) {
+        Drive *drive = (Drive *)vec->envs[i];
+        DriveNet *net = rt->nets[i];
+        if (net == NULL) {
+            PyErr_SetString(PyExc_RuntimeError, "Missing DriveNet for env index");
+            return NULL;
+        }
+        if (net->num_agents != drive->active_agent_count) {
+            PyErr_SetString(PyExc_RuntimeError, "active_agent_count changed; reinitialize policy runtime");
+            return NULL;
+        }
+        forward(net, drive->observations, (int *)drive->actions);
+        c_step(drive);
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *vec_policy_close(PyObject *self, PyObject *args) {
+    if (PyTuple_Size(args) != 1) {
+        PyErr_SetString(PyExc_TypeError, "vec_policy_close requires 1 argument: vec_handle");
+        return NULL;
+    }
+
+    VecEnv *vec = unpack_vecenv(args);
+    if (!vec) {
+        return NULL;
+    }
+    remove_runtime(vec);
+    Py_RETURN_NONE;
 }

@@ -11,9 +11,11 @@ This script validates an end-to-end path using currently exposed Python APIs:
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import struct
 import sys
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
@@ -61,6 +63,9 @@ class BridgeConfig:
     camera_yaw_mode: str
     camera_yaw_fixed_rad: float
     flip_lateral_axis: bool
+    control_source: str
+    policy_path: str
+    actions_log_path: Path | None
 
 
 @dataclass
@@ -258,6 +263,25 @@ def parse_args() -> BridgeConfig:
         action="store_true",
         help="Flip Y axis (and yaw sign) before feeding RAP renderer to match native left/right orientation",
     )
+    parser.add_argument(
+        "--control-source",
+        type=str,
+        default="neutral_actions",
+        choices=["neutral_actions", "native_policy"],
+        help="When not in replay mode, step environment with neutral actions or native policy forward+c_step",
+    )
+    parser.add_argument(
+        "--policy-path",
+        type=str,
+        default="resources/drive/puffer_drive_weights.bin",
+        help="Native policy weights path used when --control-source native_policy",
+    )
+    parser.add_argument(
+        "--actions-log",
+        type=Path,
+        default=None,
+        help="Optional CSV path to log native-policy actions per transition",
+    )
     args = parser.parse_args()
     cameras = [c.strip() for c in args.cameras.split(",") if c.strip()]
     if not cameras:
@@ -292,6 +316,9 @@ def parse_args() -> BridgeConfig:
         camera_yaw_mode=args.camera_yaw_mode,
         camera_yaw_fixed_rad=args.camera_yaw_fixed_rad,
         flip_lateral_axis=args.flip_lateral_axis,
+        control_source=args.control_source,
+        policy_path=args.policy_path,
+        actions_log_path=args.actions_log,
     )
 
 
@@ -889,6 +916,10 @@ def run_bridge(cfg: BridgeConfig) -> None:
     )
     try:
         env.reset(seed=cfg.seed)
+        if cfg.replay_mode and cfg.control_source == "native_policy":
+            raise ValueError("native_policy control source cannot be combined with replay mode")
+        if (not cfg.replay_mode) and cfg.control_source == "native_policy":
+            env.init_native_policy(cfg.policy_path)
         state0 = env.get_global_agent_state()
         valid0 = valid_agent_indices(state0)
         ego_idx = choose_ego_index(valid0, cfg.ego_agent_index, cfg.ego_select_mode)
@@ -938,7 +969,9 @@ def run_bridge(cfg: BridgeConfig) -> None:
         if cfg.replay_mode:
             print(f"Replay mode: {cfg.replay_source}")
         else:
-            print("Replay mode: step_neutral_actions")
+            print(f"Replay mode: off (control_source={cfg.control_source})")
+            if cfg.control_source == "native_policy":
+                print(f"Policy path: {cfg.policy_path}")
         print(
             f"Camera yaw mode: {cfg.camera_yaw_mode} (fixed_rad={cfg.camera_yaw_fixed_rad:.3f})"
         )
@@ -948,6 +981,27 @@ def run_bridge(cfg: BridgeConfig) -> None:
         lock_ego_slot = bool(cfg.replay_mode and cfg.replay_source == "ground_truth")
         print(f"Ego slot lock: {lock_ego_slot}")
         qa = init_qa_accumulator(cfg.cameras)
+        action_log_file = None
+        action_log_writer = None
+        if cfg.actions_log_path is not None:
+            cfg.actions_log_path.parent.mkdir(parents=True, exist_ok=True)
+            action_log_file = open(cfg.actions_log_path, "w", newline="", encoding="utf-8")
+            action_log_writer = csv.DictWriter(
+                action_log_file,
+                fieldnames=[
+                    "frame",
+                    "ego_slot",
+                    "ego_id",
+                    "ego_action",
+                    "action_count",
+                    "action_min",
+                    "action_max",
+                    "action_sum",
+                    "action_crc32",
+                ],
+            )
+            action_log_writer.writeheader()
+            print(f"Actions log: {cfg.actions_log_path}")
         map_bin_path = infer_map_bin_path(env, cfg.map_dir)
         lane_polylines_abs: List[np.ndarray] = []
         if map_bin_path is not None:
@@ -1030,11 +1084,34 @@ def run_bridge(cfg: BridgeConfig) -> None:
                 map_feature_count=len(map_features),
                 box_count=int(scenario["anns"]["gt_boxes_world"].shape[0]),
             )
-            if not cfg.replay_mode:
-                step_env_with_zeros(env)
+            if (not cfg.replay_mode) and (t < cfg.frames - 1):
+                step_ego_slot = int(current_ego_idx)
+                step_ego_id = int(state["id"][step_ego_slot]) if step_ego_slot < state["id"].shape[0] else -1
+                if cfg.control_source == "native_policy":
+                    env.step_native_policy()
+                    if action_log_writer is not None:
+                        acts = np.array(env.actions, dtype=np.int32, copy=False).reshape(-1)
+                        ego_action = int(acts[step_ego_slot]) if 0 <= step_ego_slot < acts.shape[0] else -1
+                        action_log_writer.writerow(
+                            {
+                                "frame": t,
+                                "ego_slot": step_ego_slot,
+                                "ego_id": step_ego_id,
+                                "ego_action": ego_action,
+                                "action_count": int(acts.shape[0]),
+                                "action_min": int(np.min(acts)) if acts.size else 0,
+                                "action_max": int(np.max(acts)) if acts.size else 0,
+                                "action_sum": int(np.sum(acts, dtype=np.int64)) if acts.size else 0,
+                                "action_crc32": int(zlib.crc32(acts.tobytes()) & 0xFFFFFFFF),
+                            }
+                        )
+                else:
+                    step_env_with_zeros(env)
         print_qa_summary(qa, cfg.frames)
 
     finally:
+        if "action_log_file" in locals() and action_log_file is not None:
+            action_log_file.close()
         env.close()
 
 

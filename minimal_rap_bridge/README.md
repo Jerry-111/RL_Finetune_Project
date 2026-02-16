@@ -136,6 +136,178 @@ python minimal_rap_bridge/render_pufferdrive_to_rap.py \
 
 Use `--replay-source ground_truth` to replay logged trajectories instead of open-loop rollout. This is recommended for validating geometry alignment, because open-loop stepping can still diverge from logged trajectories.
 
+### Trimmed Baseline Script (known-good defaults)
+
+Use this script as the clean starting point for further closed-loop work. It keeps the known-good settings fixed:
+- replay source is always `captured`
+- lateral flip is always disabled
+
+```bash
+python minimal_rap_bridge/render_pufferdrive_to_rap_baseline.py \
+  --out-dir /tmp/pd_rap_baseline \
+  --frames 80 \
+  --episode-length 120 \
+  --seed 1 \
+  --map-dir resources/drive/binaries \
+  --num-maps 1 \
+  --num-agents 32 \
+  --cameras CAM_F0,CAM_L0,CAM_R0 \
+  --ego-select-mode native_visualize \
+  --include-ego-box \
+  --camera-yaw-mode heading
+```
+
+For native closed-loop stepping (`forward(net, obs) -> c_step`) with the same trimmed RAP path:
+
+```bash
+python minimal_rap_bridge/render_pufferdrive_to_rap_baseline.py \
+  --out-dir /tmp/pd_rap_baseline_native_policy \
+  --frames 80 \
+  --episode-length 120 \
+  --seed 1 \
+  --map-dir resources/drive/binaries \
+  --num-maps 1 \
+  --num-agents 32 \
+  --cameras CAM_F0,CAM_L0,CAM_R0 \
+  --ego-select-mode native_visualize \
+  --include-ego-box \
+  --camera-yaw-mode heading \
+  --control-source native_policy \
+  --policy-path resources/drive/puffer_drive_weights.bin
+```
+
+### Native Policy Step-by-Step Test
+
+Run these in order to isolate issues quickly:
+
+1) Verify native-policy APIs exist in binding:
+```bash
+./.venv-pufferdrive-rap/bin/python -c "from pufferlib.ocean.drive import binding; print(hasattr(binding,'vec_policy_init'), hasattr(binding,'vec_policy_step'), hasattr(binding,'vec_policy_close'))"
+```
+
+2) Verify one native policy step works in `Drive`:
+```bash
+./.venv-pufferdrive-rap/bin/python -c "from pufferlib.ocean.drive.drive import Drive; env=Drive(num_agents=16,num_maps=1,map_dir='resources/drive/binaries',control_mode='control_agents',init_mode='create_all_valid',episode_length=10,resample_frequency=0,report_interval=100); env.reset(seed=1); env.init_native_policy('resources/drive/puffer_drive_weights.bin'); env.step_native_policy(); print('tick', env.tick, 'action0', int(env.actions[0])); env.close()"
+```
+
+3) Render 1-frame RAP smoke with native policy:
+```bash
+./.venv-pufferdrive-rap/bin/python minimal_rap_bridge/render_pufferdrive_to_rap_baseline.py \
+  --out-dir /tmp/pd_rap_baseline_native_smoke \
+  --frames 1 \
+  --episode-length 2 \
+  --map-dir resources/drive/binaries \
+  --num-maps 1 \
+  --num-agents 16 \
+  --cameras CAM_F0 \
+  --control-source native_policy
+```
+
+4) If step (3) is stable, increase frames and compare against native video workflow.
+
+### State-vs-RAP Baseline Compare (clean script)
+
+Use this for side-by-side debugging panels with the same trimmed conventions.
+
+Captured replay mode:
+```bash
+python minimal_rap_bridge/compare_state_vs_rap_baseline.py \
+  --out-dir /tmp/pd_rap_state_compare_baseline_captured \
+  --frames 80 \
+  --episode-length 120 \
+  --seed 1 \
+  --map-dir resources/drive/binaries \
+  --num-maps 1 \
+  --num-agents 32 \
+  --cameras CAM_F0,CAM_L0,CAM_R0 \
+  --panel-camera CAM_F0 \
+  --ego-select-mode native_visualize \
+  --include-ego-box \
+  --control-source captured_replay
+```
+
+Native policy closed-loop mode:
+```bash
+python minimal_rap_bridge/compare_state_vs_rap_baseline.py \
+  --out-dir /tmp/pd_rap_state_compare_baseline_native \
+  --frames 80 \
+  --episode-length 120 \
+  --seed 1 \
+  --map-dir resources/drive/binaries \
+  --num-maps 1 \
+  --num-agents 32 \
+  --cameras CAM_F0,CAM_L0,CAM_R0 \
+  --panel-camera CAM_F0 \
+  --ego-select-mode native_visualize \
+  --include-ego-box \
+  --control-source native_policy \
+  --policy-path resources/drive/puffer_drive_weights.bin
+```
+
+### One-Command Pipeline (compare + render + RAP strip video + native-vs-RAP match)
+
+```bash
+bash minimal_rap_bridge/run_native_policy_pipeline.sh \
+  --native-video /tmp/pd_native_vs_rap/native_agent.mp4 \
+  --out-root /tmp/pd_rap_pipeline_native \
+  --frames 80 \
+  --episode-length 120 \
+  --seed 1 \
+  --map-dir resources/drive/binaries \
+  --num-maps 1 \
+  --num-agents 21 \
+  --control-mode control_vehicles \
+  --init-mode create_all_valid \
+  --cameras CAM_F0,CAM_L0,CAM_R0 \
+  --panel-camera CAM_F0 \
+  --ego-select-mode native_visualize \
+  --include-ego-box \
+  --policy-path resources/drive/puffer_drive_weights.bin \
+  --strip-cameras CAM_L0,CAM_F0,CAM_R0 \
+  --strip-fps 10 \
+  --strip-video /tmp/pd_rap_pipeline_native/rap_strip_lfr.mp4 \
+  --frame-offset 0 \
+  --sample-every 1 \
+  --max-samples 80
+```
+
+By default this pipeline also:
+- logs native-policy actions from a no-render reference loop
+- logs native-policy actions during RAP render
+- writes an action consistency report (reference vs RAP)
+- writes a stitched horizontal RAP video from left/front/right cameras
+
+Outputs under `--out-root` include:
+- `native_policy_actions_ref.csv`
+- `native_policy_actions_rap.csv`
+- `action_log_compare.txt`
+- `rap_strip_lfr.mp4`
+
+Use `--skip-action-check` to disable action-log comparison.
+Use `--skip-strip-video` to disable stitched RAP strip video generation.
+
+If ego identity still mismatches native, lock ego explicitly:
+
+```bash
+bash minimal_rap_bridge/run_native_policy_pipeline.sh \
+  --native-video /tmp/pd_native_vs_rap/native_agent.mp4 \
+  --out-root /tmp/pd_rap_pipeline_native_ego_locked \
+  --frames 80 \
+  --episode-length 120 \
+  --seed 1 \
+  --map-dir resources/drive/binaries \
+  --num-maps 1 \
+  --num-agents 21 \
+  --control-mode control_vehicles \
+  --init-mode create_all_valid \
+  --cameras CAM_F0,CAM_L0,CAM_R0 \
+  --panel-camera CAM_F0 \
+  --ego-select-mode index \
+  --ego-agent-index 6 \
+  --include-ego-box \
+  --policy-path resources/drive/puffer_drive_weights.bin
+```
+
 Create short MP4s from rendered frames:
 
 ```bash
