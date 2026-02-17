@@ -296,28 +296,45 @@ Use `--native-ego-log <log.txt>` to override RAP ego selection from native visua
 Example native render + ego metadata capture:
 
 ```bash
+NO_TRAIN=1 python setup.py build_ext --inplace --force
+
+SEED=1
+OUT_NATIVE=/tmp/pd_native_vs_rap_seed${SEED}
+OUT_PIPE=/tmp/pd_rap_pipeline_seed${SEED}
+mkdir -p "${OUT_NATIVE}" "${OUT_PIPE}"
+
+ASAN_OPTIONS=detect_leaks=0 LSAN_OPTIONS=detect_leaks=0 \
 LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1920x1120x24 -ac" \
   ./visualize \
   --map-name resources/drive/binaries/map_000.bin \
   --policy-name resources/drive/puffer_drive_weights.bin \
   --view agent \
-  --ego-random-seed 1 \
-  --output-agent /tmp/pd_native_vs_rap/native_agent_fresh.mp4 | tee /tmp/pd_native_vs_rap/native_agent_fresh.log
+  --ego-random-seed "${SEED}" \
+  --output-topdown "${OUT_NATIVE}/native_topdown.mp4" \
+  --output-agent "${OUT_NATIVE}/native_agent.mp4" \
+  | tee "${OUT_NATIVE}/native_agent.log"
 ```
 
 Then run pipeline with native ego override:
 
 ```bash
 bash minimal_rap_bridge/run_native_policy_pipeline.sh \
-  --native-video /tmp/pd_native_vs_rap/native_agent_fresh.mp4 \
-  --native-ego-log /tmp/pd_native_vs_rap/native_agent_fresh.log \
-  --out-root /tmp/pd_rap_pipeline_native_fresh \
+  --native-video "${OUT_NATIVE}/native_agent.mp4" \
+  --native-ego-log "${OUT_NATIVE}/native_agent.log" \
+  --out-root "${OUT_PIPE}" \
   --frames 80 \
   --episode-length 120 \
-  --seed 1 \
+  --seed "${SEED}" \
   --map-dir resources/drive/binaries \
   --num-maps 1 \
-  --num-agents 21
+  --num-agents 21 \
+  --cameras CAM_F0,CAM_L0,CAM_R0 \
+  --panel-camera CAM_F0 \
+  --ego-select-mode random_seeded \
+  --ego-random-seed "${SEED}" \
+  --include-ego-box \
+  --policy-path resources/drive/puffer_drive_weights.bin \
+  --match-native-length
 ```
 
 ### Action/State Sync Criteria (what is checked)
