@@ -35,9 +35,15 @@ def parse_args() -> BridgeConfig:
         "--ego-select-mode",
         type=str,
         default="index",
-        choices=["index", "native_visualize"],
+        choices=["index", "native_visualize", "random_seeded"],
     )
     parser.add_argument("--ego-agent-index", type=int, default=6)
+    parser.add_argument(
+        "--ego-random-seed",
+        type=int,
+        default=None,
+        help="Seed used when --ego-select-mode random_seeded (default: --seed)",
+    )
     parser.add_argument("--include-ego-box", action="store_true")
     parser.add_argument("--assumed-height", type=float, default=1.6)
     parser.add_argument("--map-radius", type=float, default=120.0)
@@ -86,6 +92,11 @@ def parse_args() -> BridgeConfig:
         default=None,
         help="Optional CSV path to log native-policy actions per transition",
     )
+    parser.add_argument(
+        "--show-respawned-agents",
+        action="store_true",
+        help="Do not hide agents that have respawned (native visualize hides them by default)",
+    )
     args = parser.parse_args()
 
     cameras = [c.strip() for c in args.cameras.split(",") if c.strip()]
@@ -120,12 +131,14 @@ def parse_args() -> BridgeConfig:
         replay_mode=use_captured_replay,
         replay_source="captured",
         ego_select_mode=args.ego_select_mode,
+        ego_random_seed=(args.seed if args.ego_random_seed is None else args.ego_random_seed),
         camera_yaw_mode=args.camera_yaw_mode,
         camera_yaw_fixed_rad=args.camera_yaw_fixed_rad,
         flip_lateral_axis=False,
         control_source=("native_policy" if not use_captured_replay else "neutral_actions"),
         policy_path=args.policy_path,
         actions_log_path=args.actions_log,
+        hide_respawned_agents=(not args.show_respawned_agents),
     )
 
 

@@ -23,10 +23,12 @@ from render_pufferdrive_to_rap import (
     compute_camera_yaw,
     extract_lane_polylines_abs_from_map_bin,
     get_nonzero_counts,
+    infer_ego_env_slice,
     infer_map_bin_path,
     make_scenario,
     maybe_rescale_renderer_intrinsics,
     resolve_ego_index_by_id,
+    slice_state_to_env,
     valid_agent_indices,
 )
 
@@ -54,9 +56,15 @@ def parse_args() -> argparse.Namespace:
         "--ego-select-mode",
         type=str,
         default="index",
-        choices=["index", "native_visualize"],
+        choices=["index", "native_visualize", "random_seeded"],
     )
     parser.add_argument("--include-ego-box", action="store_true")
+    parser.add_argument(
+        "--ego-random-seed",
+        type=int,
+        default=None,
+        help="Seed used when --ego-select-mode random_seeded (default: --seed)",
+    )
     parser.add_argument("--assumed-height", type=float, default=1.6)
     parser.add_argument("--map-radius", type=float, default=100.0)
     parser.add_argument("--agent-radius", type=float, default=None)
@@ -212,18 +220,39 @@ def main() -> None:
     try:
         env.reset(seed=args.seed)
         use_captured_replay = args.control_source == "captured_replay"
+        replay_states_full: List[Dict[str, np.ndarray]] | None = None
         if use_captured_replay:
-            replay_states = capture_rollout_states(env, args.frames)
+            replay_states_full = capture_rollout_states(env, args.frames)
+            state_ref_full = replay_states_full[0]
+        else:
+            env.init_native_policy(args.policy_path)
+            state_ref_full = env.get_global_agent_state()
+
+        ego_idx_global = choose_ego_index(
+            valid_agent_indices(state_ref_full),
+            args.ego_agent_index,
+            args.ego_select_mode,
+            (args.seed if args.ego_random_seed is None else args.ego_random_seed),
+        )
+        ego_slice_start, ego_slice_end, ego_env_idx = infer_ego_env_slice(
+            env,
+            ego_idx_global=ego_idx_global,
+            state_size=int(state_ref_full["id"].shape[0]),
+        )
+        state_ref = slice_state_to_env(state_ref_full, ego_slice_start, ego_slice_end)
+        ego_idx = int(ego_idx_global - ego_slice_start)
+        ego_id = int(state_ref["id"][ego_idx])
+        map_ids = np.array(getattr(env, "map_ids", []), dtype=np.int32).reshape(-1)
+        ego_map_id = int(map_ids[ego_env_idx]) if ego_env_idx < map_ids.shape[0] else None
+
+        if use_captured_replay:
+            assert replay_states_full is not None
+            replay_states = [slice_state_to_env(s, ego_slice_start, ego_slice_end) for s in replay_states_full]
             gt_heading_lookup = build_ground_truth_heading_lookup(env, args.frames, state_ref=replay_states[0])
             state_ref = replay_states[0]
         else:
-            env.init_native_policy(args.policy_path)
             replay_states = None
             gt_heading_lookup = None
-            state_ref = env.get_global_agent_state()
-
-        ego_idx = choose_ego_index(valid_agent_indices(state_ref), args.ego_agent_index, args.ego_select_mode)
-        ego_id = int(state_ref["id"][ego_idx])
 
         road_edges = env.get_road_edge_polylines()
         sid, boundary_polylines_abs, _, sid_candidates = choose_scenario_id_for_ego_from_road_edges(
@@ -246,14 +275,21 @@ def main() -> None:
         print(f"Output directory: {args.out_dir}")
         print(f"Scenario id: {sid}")
         print(f"Scenario id candidates in road edges: {sid_candidates}")
-        print(f"Ego index: {ego_idx}")
+        print(f"Ego index: {ego_idx} (global={ego_idx_global})")
         print(f"Ego id: {ego_id}")
+        print(
+            f"Selected env slice: env_idx={ego_env_idx}, offset=[{ego_slice_start},{ego_slice_end})"
+            + (f", map_id={ego_map_id}" if ego_map_id is not None else "")
+        )
         print(f"Ego select mode: {args.ego_select_mode}")
+        if args.ego_select_mode == "random_seeded":
+            print(f"Ego random seed: {args.seed if args.ego_random_seed is None else args.ego_random_seed}")
         print(f"Cameras: {args.cameras}")
         print(f"Panel camera: {args.panel_camera}")
         print(f"Control source: {args.control_source}")
         if not use_captured_replay:
             print(f"Policy path: {args.policy_path}")
+        print("Hide respawned agents: True")
 
         fieldnames = [
             "frame",
@@ -287,8 +323,13 @@ def main() -> None:
                 assert replay_states is not None
                 state = replay_states[t]
                 apply_ground_truth_headings_to_state(state, t, gt_heading_lookup)
+                meta_entity_type = None
+                meta_respawn_count = None
             else:
-                state = env.get_global_agent_state()
+                state = slice_state_to_env(env.get_global_agent_state(), ego_slice_start, ego_slice_end)
+                meta = slice_state_to_env(env.get_global_agent_meta(), ego_slice_start, ego_slice_end)
+                meta_entity_type = np.array(meta["entity_type"], copy=False)
+                meta_respawn_count = np.array(meta["respawn_count"], copy=False)
 
             current_ego_idx = resolve_ego_index_by_id(
                 state,
@@ -326,6 +367,9 @@ def main() -> None:
                 include_ego_box=args.include_ego_box,
                 assumed_height=args.assumed_height,
                 agent_radius=args.agent_radius,
+                entity_type=meta_entity_type,
+                respawn_count=meta_respawn_count,
+                hide_respawned_agents=True,
                 ego_heading=camera_yaw,
                 flip_lateral_axis=False,
             )

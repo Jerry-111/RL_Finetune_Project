@@ -38,6 +38,13 @@ Adjust the screen size and color depth as needed. The `xvfb-run` wrapper allows 
 
 The `visualize` tool supports several CLI arguments to control the rendering output. It also reads the `pufferlib/config/ocean/drive.ini` file for default environment settings(For more details on these settings, refer to [Configuration](simulator.md#configuration)).
 
+When rendering starts, `visualize` also prints machine-readable ego metadata lines:
+- `NATIVE_EGO_SLOT=<int>`
+- `NATIVE_EGO_ID=<int>`
+- `NATIVE_EGO_RANDOM_SEED=<int>`
+
+These are useful for downstream pipelines that need to match native ego choice exactly.
+
 ### Command Line Arguments
 
 | Argument | Description | Default |
@@ -47,6 +54,8 @@ The `visualize` tool supports several CLI arguments to control the rendering out
 | `--view <mode>` | Selects which views to render: `agent`, `topdown`, or `both`. | `both` |
 | `--output-agent <path>` | Output filename for agent view video. | `<policy>_agent.mp4` |
 | `--output-topdown <path>` | Output filename for top-down view video. | `<policy>_topdown.mp4` |
+| `--ego-agent-index <n>` | Force ego slot index used by agent view camera. | Random |
+| `--ego-random-seed <n>` | Seed used before random ego selection. | Unset |
 | `--frame-skip <n>` | Renders every Nth frame to speed up generation (framerate remains 30fps). | `1` |
 | `--num-maps <n>` | Overrides the number of maps to sample from if `--map-name` is not set. | `drive.ini` value |
 

@@ -38,9 +38,15 @@ def parse_args() -> argparse.Namespace:
         "--ego-select-mode",
         type=str,
         default="native_visualize",
-        choices=["index", "native_visualize"],
+        choices=["index", "native_visualize", "random_seeded"],
     )
     parser.add_argument("--ego-agent-index", type=int, default=6)
+    parser.add_argument(
+        "--ego-random-seed",
+        type=int,
+        default=None,
+        help="Seed used when --ego-select-mode random_seeded (default: --seed)",
+    )
     parser.add_argument("--policy-path", type=str, default="resources/drive/puffer_drive_weights.bin")
     parser.add_argument("--out-csv", type=Path, default=None, help="Optional per-step comparison CSV")
     parser.add_argument("--out-report", type=Path, default=None, help="Optional summary report text")
@@ -92,7 +98,12 @@ def main() -> None:
         env_ref.init_native_policy(args.policy_path)
 
         state0 = env_ref.get_global_agent_state()
-        ego_idx = choose_ego_index(valid_agent_indices(state0), args.ego_agent_index, args.ego_select_mode)
+        ego_idx = choose_ego_index(
+            valid_agent_indices(state0),
+            args.ego_agent_index,
+            args.ego_select_mode,
+            (args.seed if args.ego_random_seed is None else args.ego_random_seed),
+        )
         ego_id = int(state0["id"][ego_idx])
         current_ego_idx = int(ego_idx)
         last_ego_x = float(state0["x"][current_ego_idx])
@@ -153,7 +164,12 @@ def main() -> None:
         current_ego_idx = resolve_ego_index_by_id(
             state0,
             ego_id=ego_id,
-            preferred_fallback=choose_ego_index(valid_agent_indices(state0), args.ego_agent_index, args.ego_select_mode),
+            preferred_fallback=choose_ego_index(
+                valid_agent_indices(state0),
+                args.ego_agent_index,
+                args.ego_select_mode,
+                (args.seed if args.ego_random_seed is None else args.ego_random_seed),
+            ),
         )
         last_ego_x = float(state0["x"][current_ego_idx])
         last_ego_y = float(state0["y"][current_ego_idx])

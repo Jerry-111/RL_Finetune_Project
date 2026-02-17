@@ -359,6 +359,32 @@ class Drive(pufferlib.PufferEnv):
 
         return states
 
+    def get_global_agent_meta(self):
+        """Get current metadata of all active agents.
+
+        Returns:
+            dict with keys:
+              - entity_type: int32 array (1=vehicle, 2=pedestrian, 3=cyclist)
+              - respawn_count: int32 array (number of respawns so far in episode)
+        """
+        if not hasattr(binding, "vec_get_global_agent_meta"):
+            raise RuntimeError(
+                "binding.vec_get_global_agent_meta is unavailable. Rebuild extensions with: "
+                "NO_TRAIN=1 python setup.py build_ext --inplace --force"
+            )
+
+        num_agents = self.num_agents
+        meta = {
+            "entity_type": np.full(num_agents, -1, dtype=np.int32),
+            "respawn_count": np.zeros(num_agents, dtype=np.int32),
+        }
+        binding.vec_get_global_agent_meta(
+            self.c_envs,
+            meta["entity_type"],
+            meta["respawn_count"],
+        )
+        return meta
+
     def get_ground_truth_trajectories(self):
         """Get ground truth trajectories for all active agents.
 

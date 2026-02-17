@@ -63,6 +63,8 @@ If you already use the RAP smoke venv, activate it first, then ensure PufferDriv
 
 Note: RAP camera intrinsics are native to `1920x1120`. If you render at another size, the bridge now rescales intrinsics by default to avoid perspective/horizon mismatch.
 Note: The bridge now augments `map_features` with lane/road-line polylines parsed from the `.bin` map, in addition to road-edge boundaries.
+Note: If `--num-agents` triggers Drive vectorization (multiple envs), the bridge now auto-selects the ego env slice and only renders that slice; duplicated road-edge polylines are deduplicated.
+Note: In native-policy mode, respawned agents are hidden by default to match native visualize behavior. Use `--show-respawned-agents` to disable this.
 
 ---
 
@@ -260,12 +262,14 @@ bash minimal_rap_bridge/run_native_policy_pipeline.sh \
   --init-mode create_all_valid \
   --cameras CAM_F0,CAM_L0,CAM_R0 \
   --panel-camera CAM_F0 \
-  --ego-select-mode native_visualize \
+  --ego-select-mode random_seeded \
+  --ego-random-seed 1 \
   --include-ego-box \
   --policy-path resources/drive/puffer_drive_weights.bin \
   --strip-cameras CAM_L0,CAM_F0,CAM_R0 \
   --strip-fps 10 \
   --strip-video /tmp/pd_rap_pipeline_native/rap_strip_lfr.mp4 \
+  --match-native-length \
   --frame-offset 0 \
   --sample-every 1 \
   --max-samples 80
@@ -285,6 +289,36 @@ Outputs under `--out-root` include:
 
 Use `--skip-action-check` to disable action-log comparison.
 Use `--skip-strip-video` to disable stitched RAP strip video generation.
+Use `--ego-select-mode random_seeded --ego-random-seed <N>` for random-but-reproducible ego selection across all pipeline stages.
+Use `--match-native-length` (default on) to prevent RAP running beyond native video horizon.
+Use `--native-ego-log <log.txt>` to override RAP ego selection from native visualize metadata (`NATIVE_EGO_SLOT=...`).
+
+Example native render + ego metadata capture:
+
+```bash
+LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1920x1120x24 -ac" \
+  ./visualize \
+  --map-name resources/drive/binaries/map_000.bin \
+  --policy-name resources/drive/puffer_drive_weights.bin \
+  --view agent \
+  --ego-random-seed 1 \
+  --output-agent /tmp/pd_native_vs_rap/native_agent_fresh.mp4 | tee /tmp/pd_native_vs_rap/native_agent_fresh.log
+```
+
+Then run pipeline with native ego override:
+
+```bash
+bash minimal_rap_bridge/run_native_policy_pipeline.sh \
+  --native-video /tmp/pd_native_vs_rap/native_agent_fresh.mp4 \
+  --native-ego-log /tmp/pd_native_vs_rap/native_agent_fresh.log \
+  --out-root /tmp/pd_rap_pipeline_native_fresh \
+  --frames 80 \
+  --episode-length 120 \
+  --seed 1 \
+  --map-dir resources/drive/binaries \
+  --num-maps 1 \
+  --num-agents 21
+```
 
 ### Action/State Sync Criteria (what is checked)
 
@@ -292,7 +326,7 @@ Action consistency is validated in two layers:
 
 1) Action log parity (`compare_action_logs.py`)
 - compares per-transition rows from reference native loop vs RAP render loop:
-  - `ego_slot`, `ego_id`, `ego_action`, `action_count`, `action_sum`, `action_crc32`
+  - `ego_slot`, `ego_slot_global`, `ego_id`, `ego_action`, `action_count`, `action_sum`, `action_crc32`
 - `action_crc32` is computed over the full action tensor bytes for that step, so any slot/action difference fails parity.
 - Pass condition:
   - `row_count_match=True`

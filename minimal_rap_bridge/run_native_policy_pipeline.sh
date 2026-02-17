@@ -20,8 +20,10 @@ Optional:
   --num-agents N               Number of agents (default: 21; recommended single-env)
   --cameras LIST               Comma-separated cameras (default: CAM_F0,CAM_L0,CAM_R0)
   --panel-camera ID            Panel camera and matching camera (default: CAM_F0)
-  --ego-select-mode MODE       index|native_visualize (default: native_visualize)
+  --ego-select-mode MODE       index|native_visualize|random_seeded (default: random_seeded)
   --ego-agent-index N          Ego index when --ego-select-mode index (default: 6)
+  --ego-random-seed N          Seed for random_seeded ego mode (default: --seed)
+  --native-ego-log PATH        Parse NATIVE_EGO_* metadata from native visualize log and override ego selection
   --control-mode MODE          control_vehicles|control_agents|control_wosac|control_sdc_only (default: control_vehicles)
   --init-mode MODE             create_all_valid|create_only_controlled (default: create_all_valid)
   --include-ego-box            Include ego box (default: enabled)
@@ -33,6 +35,8 @@ Optional:
   --strip-codec FOURCC         RAP strip OpenCV FOURCC fallback (default: MJPG)
   --strip-video PATH           RAP strip video output path (default: <out-root>/rap_strip_lfr.mp4)
   --skip-strip-video           Skip RAP strip video generation
+  --match-native-length        Clamp RAP frames to native video length (default: enabled)
+  --no-match-native-length     Disable native-length clamping
   --frame-offset N             Native-vs-RAP offset (default: 0)
   --sample-every N             Native-vs-RAP sample stride (default: 1)
   --max-samples N              Native-vs-RAP max pairs (default: 80)
@@ -51,8 +55,10 @@ NUM_MAPS=1
 NUM_AGENTS=21
 CAMERAS="CAM_F0,CAM_L0,CAM_R0"
 PANEL_CAMERA="CAM_F0"
-EGO_SELECT_MODE="native_visualize"
+EGO_SELECT_MODE="random_seeded"
 EGO_AGENT_INDEX=6
+EGO_RANDOM_SEED=""
+NATIVE_EGO_LOG=""
 CONTROL_MODE="control_vehicles"
 INIT_MODE="create_all_valid"
 INCLUDE_EGO_BOX=1
@@ -63,6 +69,7 @@ STRIP_BACKEND="auto"
 STRIP_CODEC="MJPG"
 STRIP_VIDEO=""
 DO_STRIP_VIDEO=1
+MATCH_NATIVE_LENGTH=1
 FRAME_OFFSET=0
 SAMPLE_EVERY=1
 MAX_SAMPLES=80
@@ -83,6 +90,8 @@ while [[ $# -gt 0 ]]; do
     --panel-camera) PANEL_CAMERA="$2"; shift 2 ;;
     --ego-select-mode) EGO_SELECT_MODE="$2"; shift 2 ;;
     --ego-agent-index) EGO_AGENT_INDEX="$2"; shift 2 ;;
+    --ego-random-seed) EGO_RANDOM_SEED="$2"; shift 2 ;;
+    --native-ego-log) NATIVE_EGO_LOG="$2"; shift 2 ;;
     --control-mode) CONTROL_MODE="$2"; shift 2 ;;
     --init-mode) INIT_MODE="$2"; shift 2 ;;
     --include-ego-box) INCLUDE_EGO_BOX=1; shift 1 ;;
@@ -94,6 +103,8 @@ while [[ $# -gt 0 ]]; do
     --strip-codec) STRIP_CODEC="$2"; shift 2 ;;
     --strip-video) STRIP_VIDEO="$2"; shift 2 ;;
     --skip-strip-video) DO_STRIP_VIDEO=0; shift 1 ;;
+    --match-native-length) MATCH_NATIVE_LENGTH=1; shift 1 ;;
+    --no-match-native-length) MATCH_NATIVE_LENGTH=0; shift 1 ;;
     --frame-offset) FRAME_OFFSET="$2"; shift 2 ;;
     --sample-every) SAMPLE_EVERY="$2"; shift 2 ;;
     --max-samples) MAX_SAMPLES="$2"; shift 2 ;;
@@ -119,6 +130,76 @@ if [[ -z "${PYTHON_BIN}" ]]; then
   else
     PYTHON_BIN="python"
   fi
+fi
+
+if [[ -z "${EGO_RANDOM_SEED}" ]]; then
+  EGO_RANDOM_SEED="${SEED}"
+fi
+
+if [[ -n "${NATIVE_EGO_LOG}" ]]; then
+  if [[ ! -f "${NATIVE_EGO_LOG}" ]]; then
+    echo "Native ego log not found: ${NATIVE_EGO_LOG}" >&2
+    exit 1
+  fi
+
+  NATIVE_EGO_SLOT="$(awk -F= '/^NATIVE_EGO_SLOT=/{print $2}' "${NATIVE_EGO_LOG}" | tail -n 1)"
+  NATIVE_EGO_ID="$(awk -F= '/^NATIVE_EGO_ID=/{print $2}' "${NATIVE_EGO_LOG}" | tail -n 1)"
+  NATIVE_EGO_RANDOM_SEED="$(awk -F= '/^NATIVE_EGO_RANDOM_SEED=/{print $2}' "${NATIVE_EGO_LOG}" | tail -n 1)"
+
+  if [[ -n "${NATIVE_EGO_SLOT}" ]]; then
+    if [[ ! "${NATIVE_EGO_SLOT}" =~ ^-?[0-9]+$ ]]; then
+      echo "Invalid NATIVE_EGO_SLOT in ${NATIVE_EGO_LOG}: ${NATIVE_EGO_SLOT}" >&2
+      exit 1
+    fi
+    EGO_SELECT_MODE="index"
+    EGO_AGENT_INDEX="${NATIVE_EGO_SLOT}"
+    echo "[info] using native ego slot from log: slot=${NATIVE_EGO_SLOT}${NATIVE_EGO_ID:+, id=${NATIVE_EGO_ID}}"
+  elif [[ -n "${NATIVE_EGO_RANDOM_SEED}" && "${NATIVE_EGO_RANDOM_SEED}" =~ ^-?[0-9]+$ && "${NATIVE_EGO_RANDOM_SEED}" -ge 0 ]]; then
+    EGO_SELECT_MODE="random_seeded"
+    EGO_RANDOM_SEED="${NATIVE_EGO_RANDOM_SEED}"
+    echo "[info] using native ego random seed from log: seed=${NATIVE_EGO_RANDOM_SEED}"
+  else
+    echo "No usable NATIVE_EGO_SLOT or NATIVE_EGO_RANDOM_SEED found in ${NATIVE_EGO_LOG}" >&2
+    exit 1
+  fi
+fi
+
+if [[ "${MATCH_NATIVE_LENGTH}" -eq 1 ]]; then
+  NATIVE_FRAME_COUNT="$(
+    "${PYTHON_BIN}" - "${NATIVE_VIDEO}" <<'PY'
+import cv2
+import sys
+
+video_path = sys.argv[1]
+cap = cv2.VideoCapture(video_path)
+if not cap.isOpened():
+    raise RuntimeError(f"failed to open native video: {video_path}")
+count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+cap.release()
+print(count)
+PY
+  )"
+  if [[ -z "${NATIVE_FRAME_COUNT}" || "${NATIVE_FRAME_COUNT}" -le 0 ]]; then
+    echo "Failed to determine native video frame count for: ${NATIVE_VIDEO}" >&2
+    exit 1
+  fi
+
+  EFFECTIVE_MAX_FRAMES="${NATIVE_FRAME_COUNT}"
+  if [[ "${FRAME_OFFSET}" -gt 0 ]]; then
+    EFFECTIVE_MAX_FRAMES=$((NATIVE_FRAME_COUNT - FRAME_OFFSET))
+  fi
+  if [[ "${EFFECTIVE_MAX_FRAMES}" -lt 1 ]]; then
+    echo "No overlapping frames after frame offset: native_frames=${NATIVE_FRAME_COUNT}, frame_offset=${FRAME_OFFSET}" >&2
+    exit 1
+  fi
+  if [[ "${FRAMES}" -gt "${EFFECTIVE_MAX_FRAMES}" ]]; then
+    echo "[info] clamping --frames from ${FRAMES} to ${EFFECTIVE_MAX_FRAMES} to match native video horizon"
+    FRAMES="${EFFECTIVE_MAX_FRAMES}"
+  fi
+  if [[ "${MAX_SAMPLES}" -gt "${FRAMES}" ]]; then
+    MAX_SAMPLES="${FRAMES}"
+  fi
+  echo "[info] native length guard: native_frames=${NATIVE_FRAME_COUNT}, frame_offset=${FRAME_OFFSET}, run_frames=${FRAMES}"
 fi
 
 NUM_ENVS="$(
@@ -183,6 +264,7 @@ COMMON_ARGS=(
   --init-mode "${INIT_MODE}"
   --ego-select-mode "${EGO_SELECT_MODE}"
   --ego-agent-index "${EGO_AGENT_INDEX}"
+  --ego-random-seed "${EGO_RANDOM_SEED}"
   --control-source native_policy
   --policy-path "${POLICY_PATH}"
 )
@@ -205,6 +287,7 @@ if [[ "${DO_ACTION_CHECK}" -eq 1 ]]; then
     --init-mode "${INIT_MODE}" \
     --ego-select-mode "${EGO_SELECT_MODE}" \
     --ego-agent-index "${EGO_AGENT_INDEX}" \
+    --ego-random-seed "${EGO_RANDOM_SEED}" \
     --policy-path "${POLICY_PATH}"
 fi
 

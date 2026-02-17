@@ -60,12 +60,14 @@ class BridgeConfig:
     replay_mode: bool
     replay_source: str
     ego_select_mode: str
+    ego_random_seed: int
     camera_yaw_mode: str
     camera_yaw_fixed_rad: float
     flip_lateral_axis: bool
     control_source: str
     policy_path: str
     actions_log_path: Path | None
+    hide_respawned_agents: bool
 
 
 @dataclass
@@ -237,8 +239,14 @@ def parse_args() -> BridgeConfig:
         "--ego-select-mode",
         type=str,
         default="index",
-        choices=["index", "native_visualize"],
+        choices=["index", "native_visualize", "random_seeded"],
         help="Ego selection policy: explicit index or native visualize-style first rand() pick",
+    )
+    parser.add_argument(
+        "--ego-random-seed",
+        type=int,
+        default=None,
+        help="Seed used when --ego-select-mode random_seeded (default: --seed)",
     )
     parser.add_argument(
         "--replay-ground-truth",
@@ -282,6 +290,11 @@ def parse_args() -> BridgeConfig:
         default=None,
         help="Optional CSV path to log native-policy actions per transition",
     )
+    parser.add_argument(
+        "--show-respawned-agents",
+        action="store_true",
+        help="Do not hide agents that have respawned (native visualize hides them by default)",
+    )
     args = parser.parse_args()
     cameras = [c.strip() for c in args.cameras.split(",") if c.strip()]
     if not cameras:
@@ -313,12 +326,14 @@ def parse_args() -> BridgeConfig:
         replay_mode=(args.replay_captured or args.replay_ground_truth),
         replay_source=("ground_truth" if args.replay_ground_truth else args.replay_source),
         ego_select_mode=args.ego_select_mode,
+        ego_random_seed=(args.seed if args.ego_random_seed is None else args.ego_random_seed),
         camera_yaw_mode=args.camera_yaw_mode,
         camera_yaw_fixed_rad=args.camera_yaw_fixed_rad,
         flip_lateral_axis=args.flip_lateral_axis,
         control_source=args.control_source,
         policy_path=args.policy_path,
         actions_log_path=args.actions_log,
+        hide_respawned_agents=(not args.show_respawned_agents),
     )
 
 
@@ -328,6 +343,7 @@ def extract_boundary_polylines_abs(
 ) -> List[np.ndarray]:
     """Extract absolute-world boundary polylines from flattened road-edge arrays."""
     polylines_abs: List[np.ndarray] = []
+    seen_signatures: set[Tuple[int, int, int, int, int, int]] = set()
     lengths = road_edges["lengths"]
     xs = road_edges["x"]
     ys = road_edges["y"]
@@ -348,6 +364,20 @@ def extract_boundary_polylines_abs(
 
         polyline = np.stack([x_seg, y_seg], axis=1).astype(np.float32)
         if np.isfinite(polyline).all():
+            # Multi-env vectorization can return duplicated map polylines.
+            # Deduplicate by rounded shape+endpoints+crc to keep one copy.
+            quant = np.round(polyline * 100.0).astype(np.int32)
+            sig = (
+                int(quant.shape[0]),
+                int(quant[0, 0]),
+                int(quant[0, 1]),
+                int(quant[-1, 0]),
+                int(quant[-1, 1]),
+                int(zlib.crc32(quant.tobytes()) & 0xFFFFFFFF),
+            )
+            if sig in seen_signatures:
+                continue
+            seen_signatures.add(sig)
             polylines_abs.append(polyline)
 
     return polylines_abs
@@ -507,7 +537,12 @@ def valid_agent_indices(state: Dict[str, np.ndarray]) -> np.ndarray:
     return np.flatnonzero(mask)
 
 
-def choose_ego_index(valid_idx: np.ndarray, preferred: int, mode: str) -> int:
+def choose_ego_index(
+    valid_idx: np.ndarray,
+    preferred: int,
+    mode: str,
+    random_seed: int | None = None,
+) -> int:
     if len(valid_idx) == 0:
         raise RuntimeError("No valid agents found in current state.")
     if mode == "native_visualize":
@@ -515,9 +550,38 @@ def choose_ego_index(valid_idx: np.ndarray, preferred: int, mode: str) -> int:
         # On glibc default seed path, the first rand() is 1804289383.
         k = 1804289383 % len(valid_idx)
         return int(valid_idx[k])
+    if mode == "random_seeded":
+        rng = np.random.default_rng(0 if random_seed is None else int(random_seed))
+        k = int(rng.integers(0, len(valid_idx)))
+        return int(valid_idx[k])
     if preferred in set(valid_idx.tolist()):
         return preferred
     return int(valid_idx[0])
+
+
+def infer_ego_env_slice(env: Drive, ego_idx_global: int, state_size: int) -> Tuple[int, int, int]:
+    """Infer [start,end) slice for the vec-env containing the selected global ego slot."""
+    offsets = np.array(getattr(env, "agent_offsets", []), dtype=np.int32).reshape(-1)
+    if state_size <= 0:
+        return 0, 0, 0
+    if offsets.size < 2:
+        return 0, int(state_size), 0
+
+    clamped_idx = int(np.clip(int(ego_idx_global), 0, state_size - 1))
+    env_idx = int(np.searchsorted(offsets, clamped_idx, side="right") - 1)
+    env_idx = max(0, min(env_idx, int(offsets.size - 2)))
+    start = int(offsets[env_idx])
+    end = int(offsets[env_idx + 1])
+    start = max(0, min(start, int(state_size)))
+    end = max(start, min(end, int(state_size)))
+    if end <= start:
+        return 0, int(state_size), 0
+    return start, end, env_idx
+
+
+def slice_state_to_env(state: Dict[str, np.ndarray], start: int, end: int) -> Dict[str, np.ndarray]:
+    """Return a copied state dict restricted to one vec-env slot range."""
+    return {k: np.array(v[start:end], copy=True) for k, v in state.items()}
 
 
 def infer_map_bin_path(env: Drive, map_dir: str) -> Path | None:
@@ -637,6 +701,9 @@ def build_anns_from_state(
     include_ego_box: bool,
     assumed_height: float,
     agent_radius: float | None,
+    entity_type: np.ndarray | None = None,
+    respawn_count: np.ndarray | None = None,
+    hide_respawned_agents: bool = False,
     flip_lateral_axis: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Create RAP anns fields from PufferDrive global state."""
@@ -647,10 +714,13 @@ def build_anns_from_state(
     ego_x, ego_y, ego_z = state["x"][ego_idx], state["y"][ego_idx], state["z"][ego_idx]
     boxes: List[List[float]] = []
     names: List[str] = []
-    seen_keys: set[Tuple[int, int, int, int, int]] = set()
+    seen_keys: set[Tuple[int, int, int, int, int, int]] = set()
     for i in idxs:
         if not include_ego_box and i == ego_idx:
             continue
+        if hide_respawned_agents and respawn_count is not None:
+            if int(respawn_count[i]) > 0:
+                continue
         rel_x = float(state["x"][i] - ego_x)
         rel_y = float(state["y"][i] - ego_y)
         rel_z = float(state["z"][i] - ego_z)
@@ -663,8 +733,10 @@ def build_anns_from_state(
         length = float(state["length"][i])
         width = float(state["width"][i])
         # PufferDrive can emit duplicate active rows for some ids; suppress exact overlaps.
+        etype = int(entity_type[i]) if entity_type is not None else 1
         key = (
             agent_id,
+            etype,
             int(round(rel_x * 100.0)),
             int(round(rel_y * 100.0)),
             int(round(length * 100.0)),
@@ -677,7 +749,12 @@ def build_anns_from_state(
         if flip_lateral_axis:
             yaw = -yaw
         boxes.append([rel_x, rel_y, rel_z, length, width, float(assumed_height), yaw])
-        names.append("vehicle")
+        if etype == 2:
+            names.append("pedestrian")
+        elif etype == 3:
+            names.append("cyclist")
+        else:
+            names.append("vehicle")
 
     if not boxes:
         return np.zeros((0, 7), dtype=np.float32), np.array([], dtype=object)
@@ -691,7 +768,10 @@ def make_scenario(
     include_ego_box: bool,
     assumed_height: float,
     agent_radius: float | None,
-    ego_heading: float,
+    entity_type: np.ndarray | None = None,
+    respawn_count: np.ndarray | None = None,
+    hide_respawned_agents: bool = False,
+    ego_heading: float = 0.0,
     flip_lateral_axis: bool = False,
 ) -> Dict:
     gt_boxes_world, gt_names = build_anns_from_state(
@@ -700,6 +780,9 @@ def make_scenario(
         include_ego_box=include_ego_box,
         assumed_height=assumed_height,
         agent_radius=agent_radius,
+        entity_type=entity_type,
+        respawn_count=respawn_count,
+        hide_respawned_agents=hide_respawned_agents,
         flip_lateral_axis=flip_lateral_axis,
     )
     return {
@@ -920,17 +1003,29 @@ def run_bridge(cfg: BridgeConfig) -> None:
             raise ValueError("native_policy control source cannot be combined with replay mode")
         if (not cfg.replay_mode) and cfg.control_source == "native_policy":
             env.init_native_policy(cfg.policy_path)
-        state0 = env.get_global_agent_state()
-        valid0 = valid_agent_indices(state0)
-        ego_idx = choose_ego_index(valid0, cfg.ego_agent_index, cfg.ego_select_mode)
+        state0_full = env.get_global_agent_state()
+        valid0 = valid_agent_indices(state0_full)
+        ego_idx_global = choose_ego_index(valid0, cfg.ego_agent_index, cfg.ego_select_mode, cfg.ego_random_seed)
+        ego_slice_start, ego_slice_end, ego_env_idx = infer_ego_env_slice(
+            env,
+            ego_idx_global=ego_idx_global,
+            state_size=int(state0_full["id"].shape[0]),
+        )
+        state0 = slice_state_to_env(state0_full, ego_slice_start, ego_slice_end)
+        ego_idx = int(ego_idx_global - ego_slice_start)
         ego_id = int(state0["id"][ego_idx])
+        map_ids = np.array(getattr(env, "map_ids", []), dtype=np.int32).reshape(-1)
+        ego_map_id = int(map_ids[ego_env_idx]) if ego_env_idx < map_ids.shape[0] else None
         replay_states: List[Dict[str, np.ndarray]] | None = None
         gt_heading_lookup: Dict[int, Tuple[np.ndarray, np.ndarray]] | None = None
         if cfg.replay_mode:
+            replay_states_full: List[Dict[str, np.ndarray]]
             if cfg.replay_source == "ground_truth":
-                replay_states = capture_ground_truth_rollout_states(env, cfg.frames)
+                replay_states_full = capture_ground_truth_rollout_states(env, cfg.frames)
             else:
-                replay_states = capture_rollout_states(env, cfg.frames)
+                replay_states_full = capture_rollout_states(env, cfg.frames)
+            replay_states = [slice_state_to_env(s, ego_slice_start, ego_slice_end) for s in replay_states_full]
+            if cfg.replay_source != "ground_truth":
                 gt_heading_lookup = build_ground_truth_heading_lookup(env, cfg.frames, state_ref=replay_states[0])
             state_ref = replay_states[0]
         else:
@@ -959,9 +1054,15 @@ def run_bridge(cfg: BridgeConfig) -> None:
         )
 
         print(f"Output directory: {cfg.out_dir}")
-        print(f"Selected ego index: {ego_idx}")
+        print(f"Selected ego index: {ego_idx} (global={ego_idx_global})")
         print(f"Selected ego id: {ego_id}")
+        print(
+            f"Selected env slice: env_idx={ego_env_idx}, offset=[{ego_slice_start},{ego_slice_end})"
+            + (f", map_id={ego_map_id}" if ego_map_id is not None else "")
+        )
         print(f"Ego select mode: {cfg.ego_select_mode}")
+        if cfg.ego_select_mode == "random_seeded":
+            print(f"Ego random seed: {cfg.ego_random_seed}")
         print(f"Scenario id: {sid}")
         print(f"Boundary source polylines: {len(boundary_polylines_abs)}")
         print(f"Scenario id candidates in road edges: {num_sid_candidates}")
@@ -977,6 +1078,7 @@ def run_bridge(cfg: BridgeConfig) -> None:
         )
         print(f"Flip lateral axis: {cfg.flip_lateral_axis}")
         print(f"Radius settings: map_radius={cfg.map_radius:.1f}m, agent_radius={cfg.agent_radius}")
+        print(f"Hide respawned agents: {cfg.hide_respawned_agents}")
         print(f"Cameras: {cfg.cameras}")
         lock_ego_slot = bool(cfg.replay_mode and cfg.replay_source == "ground_truth")
         print(f"Ego slot lock: {lock_ego_slot}")
@@ -991,6 +1093,7 @@ def run_bridge(cfg: BridgeConfig) -> None:
                 fieldnames=[
                     "frame",
                     "ego_slot",
+                    "ego_slot_global",
                     "ego_id",
                     "ego_action",
                     "action_count",
@@ -1030,8 +1133,13 @@ def run_bridge(cfg: BridgeConfig) -> None:
                 assert replay_states is not None
                 state = replay_states[t]
                 apply_ground_truth_headings_to_state(state, t, gt_heading_lookup)
+                meta_entity_type = None
+                meta_respawn_count = None
             else:
-                state = env.get_global_agent_state()
+                state = slice_state_to_env(env.get_global_agent_state(), ego_slice_start, ego_slice_end)
+                meta = slice_state_to_env(env.get_global_agent_meta(), ego_slice_start, ego_slice_end)
+                meta_entity_type = np.array(meta["entity_type"], copy=False)
+                meta_respawn_count = np.array(meta["respawn_count"], copy=False)
             if not lock_ego_slot:
                 current_ego_idx = resolve_ego_index_by_id(
                     state,
@@ -1071,6 +1179,9 @@ def run_bridge(cfg: BridgeConfig) -> None:
                 include_ego_box=cfg.include_ego_box,
                 assumed_height=cfg.assumed_height,
                 agent_radius=cfg.agent_radius,
+                entity_type=meta_entity_type,
+                respawn_count=meta_respawn_count,
+                hide_respawned_agents=cfg.hide_respawned_agents,
                 ego_heading=camera_yaw,
                 flip_lateral_axis=cfg.flip_lateral_axis,
             )
@@ -1085,17 +1196,19 @@ def run_bridge(cfg: BridgeConfig) -> None:
                 box_count=int(scenario["anns"]["gt_boxes_world"].shape[0]),
             )
             if (not cfg.replay_mode) and (t < cfg.frames - 1):
-                step_ego_slot = int(current_ego_idx)
-                step_ego_id = int(state["id"][step_ego_slot]) if step_ego_slot < state["id"].shape[0] else -1
+                step_ego_slot_local = int(current_ego_idx)
+                step_ego_slot_global = int(ego_slice_start + step_ego_slot_local)
+                step_ego_id = int(state["id"][step_ego_slot_local]) if step_ego_slot_local < state["id"].shape[0] else -1
                 if cfg.control_source == "native_policy":
                     env.step_native_policy()
                     if action_log_writer is not None:
                         acts = np.array(env.actions, dtype=np.int32, copy=False).reshape(-1)
-                        ego_action = int(acts[step_ego_slot]) if 0 <= step_ego_slot < acts.shape[0] else -1
+                        ego_action = int(acts[step_ego_slot_global]) if 0 <= step_ego_slot_global < acts.shape[0] else -1
                         action_log_writer.writerow(
                             {
                                 "frame": t,
-                                "ego_slot": step_ego_slot,
+                                "ego_slot": step_ego_slot_local,
+                                "ego_slot_global": step_ego_slot_global,
                                 "ego_id": step_ego_id,
                                 "ego_action": ego_action,
                                 "action_count": int(acts.shape[0]),

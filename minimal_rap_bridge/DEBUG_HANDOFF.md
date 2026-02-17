@@ -338,7 +338,10 @@ Outputs:
   - `--init-mode`
   - `--ego-select-mode`
   - `--ego-agent-index`
+  - `--ego-random-seed` (for `random_seeded` ego mode)
+  - `--native-ego-log` (override RAP ego from native visualize metadata)
 - Pipeline defaults now use `control_vehicles` + `create_all_valid` (closer to native visualize defaults).
+- Pipeline now defaults to `--ego-select-mode random_seeded` with `ego_random_seed=seed`.
 
 ## Update 2026-02-16 (close-loop action/state sync validation + single-env guard)
 
@@ -375,3 +378,42 @@ Outputs:
   - native `./visualize` camera/view behavior vs RAP sensor camera model,
   - run-config mismatch (map/source video horizon/settings),
   - fields not covered by `get_global_agent_state` checksum.
+
+## Update 2026-02-17 (near-ego ghost car / reward-point suspicion)
+
+### Symptom
+- RAP output could show a weird near-ego “extra car,” inflated box counts, and unstable interactions when `--num-agents` was large.
+
+### Root Cause
+- Not reward points.
+- `Drive` vectorizes into multiple envs when requested `num_agents` exceeds one scene’s active-agent count.
+- Bridge code previously treated the concatenated `get_global_agent_state()` tensor as one scene.
+- This merged independent env copies into one RAP scenario, creating duplicate IDs/agents and duplicated road-edge polylines.
+
+### Fix Applied
+- Added ego env-slice isolation in:
+  - `minimal_rap_bridge/render_pufferdrive_to_rap.py`
+  - `minimal_rap_bridge/compare_state_vs_rap_baseline.py`
+- Flow is now:
+  1) choose ego on global state,
+  2) infer env slice from `env.agent_offsets`,
+  3) render only that slice every frame.
+- Added road-edge dedup in `extract_boundary_polylines_abs(...)`.
+- Action logs now include both local and global ego slots (`ego_slot`, `ego_slot_global`).
+
+### Validation Snapshot
+- With `--num-agents 1024`, renders now stay in normal single-scene ranges (example `boxes=20`, `map_features=72`) instead of inflated counts.
+
+## Update 2026-02-17 (respawn visibility parity)
+
+### New Finding
+- Native visualize hides any agent once it has respawned (`respawn_timestep != -1`), while bridge state export previously kept rendering those agents.
+- This can look like a “weird extra car” in RAP that later disappears/jumps.
+
+### Fix Applied
+- Added `vec_get_global_agent_meta` binding exposing per-active-slot:
+  - `entity_type`
+  - `respawn_count`
+- Added `Drive.get_global_agent_meta()` in Python.
+- RAP bridge now hides respawned agents by default in native-policy mode (`respawn_count > 0`), with opt-out flag:
+  - `--show-respawned-agents`

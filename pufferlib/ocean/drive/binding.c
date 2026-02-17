@@ -6,10 +6,13 @@
 static PyObject *vec_policy_init(PyObject *self, PyObject *args);
 static PyObject *vec_policy_step(PyObject *self, PyObject *args);
 static PyObject *vec_policy_close(PyObject *self, PyObject *args);
+static PyObject *vec_get_global_agent_meta(PyObject *self, PyObject *args);
 #define MY_METHODS                                                                                                    \
     {"vec_policy_init", vec_policy_init, METH_VARARGS, "Initialize native Drive policy runner for a vec env"},      \
         {"vec_policy_step", vec_policy_step, METH_VARARGS, "Run native forward()+c_step() for each env in vec"},    \
-        {"vec_policy_close", vec_policy_close, METH_VARARGS, "Free native Drive policy runner for a vec env"}
+        {"vec_policy_close", vec_policy_close, METH_VARARGS, "Free native Drive policy runner for a vec env"},       \
+        {"vec_get_global_agent_meta", vec_get_global_agent_meta, METH_VARARGS,                                        \
+         "Get per-agent meta for active slots (entity_type, respawn_count)"}
 #include "../env_binding.h"
 
 static int my_put(Env *env, PyObject *args, PyObject *kwargs) {
@@ -248,6 +251,47 @@ static int my_log(PyObject *dict, Log *log) {
     assign_to_dict(dict, "speed_at_goal", log->speed_at_goal);
     // assign_to_dict(dict, "avg_displacement_error", log->avg_displacement_error);
     return 0;
+}
+
+static PyObject *vec_get_global_agent_meta(PyObject *self, PyObject *args) {
+    if (PyTuple_Size(args) != 3) {
+        PyErr_SetString(PyExc_TypeError, "vec_get_global_agent_meta requires 3 arguments");
+        return NULL;
+    }
+
+    VecEnv *vec = unpack_vecenv(args);
+    if (!vec) {
+        return NULL;
+    }
+
+    PyObject *type_arr = PyTuple_GetItem(args, 1);
+    PyObject *respawn_arr = PyTuple_GetItem(args, 2);
+    if (!PyArray_Check(type_arr) || !PyArray_Check(respawn_arr)) {
+        PyErr_SetString(PyExc_TypeError, "All output arrays must be NumPy arrays");
+        return NULL;
+    }
+
+    PyArrayObject *type_array = (PyArrayObject *)type_arr;
+    PyArrayObject *respawn_array = (PyArrayObject *)respawn_arr;
+    if (!PyArray_ISCONTIGUOUS(type_array) || !PyArray_ISCONTIGUOUS(respawn_array)) {
+        PyErr_SetString(PyExc_ValueError, "Output arrays must be contiguous");
+        return NULL;
+    }
+
+    int *type_base = (int *)PyArray_DATA(type_array);
+    int *respawn_base = (int *)PyArray_DATA(respawn_array);
+
+    int offset = 0;
+    for (int i = 0; i < vec->num_envs; i++) {
+        Drive *drive = (Drive *)vec->envs[i];
+        for (int j = 0; j < drive->active_agent_count; j++) {
+            int entity_idx = drive->active_agent_indices[j];
+            type_base[offset + j] = drive->entities[entity_idx].type;
+            respawn_base[offset + j] = drive->entities[entity_idx].respawn_count;
+        }
+        offset += drive->active_agent_count;
+    }
+    Py_RETURN_NONE;
 }
 
 typedef struct VecPolicyRuntime VecPolicyRuntime;

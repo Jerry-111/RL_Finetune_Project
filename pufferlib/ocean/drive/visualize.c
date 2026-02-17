@@ -191,7 +191,7 @@ static int make_gif_from_frames(const char *pattern, int fps, const char *palett
 
 int eval_gif(const char *map_name, const char *policy_name, int show_grid, int obs_only, int lasers,
              int show_human_logs, int frame_skip, const char *view_mode, const char *output_topdown,
-             const char *output_agent, int num_maps, int zoom_in) {
+             const char *output_agent, int num_maps, int zoom_in, int ego_agent_index, int ego_random_seed) {
 
     // Parse configuration from INI file
     env_init_config conf = {0};
@@ -259,8 +259,24 @@ int eval_gif(const char *map_name, const char *policy_name, int show_grid, int o
     }
 
     // Set which vehicle to focus on for obs mode
-    int random_agent_idx = rand() % env.active_agent_count;
-    env.human_agent_idx = random_agent_idx;
+    if (ego_random_seed >= 0) {
+        srand((unsigned int)ego_random_seed);
+    }
+    if (ego_agent_index >= 0) {
+        if (ego_agent_index >= env.active_agent_count) {
+            fprintf(stderr, "Error: --ego-agent-index %d out of range [0, %d)\n", ego_agent_index, env.active_agent_count);
+            free_allocated(&env);
+            return -1;
+        }
+        env.human_agent_idx = ego_agent_index;
+    } else {
+        int random_agent_idx = rand() % env.active_agent_count;
+        env.human_agent_idx = random_agent_idx;
+    }
+    int native_ego_entity_idx = env.active_agent_indices[env.human_agent_idx];
+    printf("NATIVE_EGO_SLOT=%d\n", env.human_agent_idx);
+    printf("NATIVE_EGO_ID=%d\n", env.entities[native_ego_entity_idx].id);
+    printf("NATIVE_EGO_RANDOM_SEED=%d\n", ego_random_seed);
 
     c_reset(&env);
 
@@ -420,6 +436,8 @@ int main(int argc, char *argv[]) {
     const char *output_topdown = NULL;
     const char *output_agent = NULL;
     int num_maps = 1;
+    int ego_agent_index = -1;
+    int ego_random_seed = -1;
 
     // Parse command line arguments
     for (int i = 1; i < argc; i++) {
@@ -485,10 +503,26 @@ int main(int argc, char *argv[]) {
                 num_maps = atoi(argv[i + 1]);
                 i++;
             }
+        } else if (strcmp(argv[i], "--ego-agent-index") == 0) {
+            if (i + 1 < argc) {
+                ego_agent_index = atoi(argv[i + 1]);
+                i++;
+            } else {
+                fprintf(stderr, "Error: --ego-agent-index option requires an integer value\n");
+                return 1;
+            }
+        } else if (strcmp(argv[i], "--ego-random-seed") == 0) {
+            if (i + 1 < argc) {
+                ego_random_seed = atoi(argv[i + 1]);
+                i++;
+            } else {
+                fprintf(stderr, "Error: --ego-random-seed option requires an integer value\n");
+                return 1;
+            }
         }
     }
 
     eval_gif(map_name, policy_name, show_grid, obs_only, lasers, show_human_logs, frame_skip, view_mode, output_topdown,
-             output_agent, num_maps, zoom_in);
+             output_agent, num_maps, zoom_in, ego_agent_index, ego_random_seed);
     return 0;
 }
