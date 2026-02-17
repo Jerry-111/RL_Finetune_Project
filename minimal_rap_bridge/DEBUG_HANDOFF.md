@@ -339,3 +339,39 @@ Outputs:
   - `--ego-select-mode`
   - `--ego-agent-index`
 - Pipeline defaults now use `control_vehicles` + `create_all_valid` (closer to native visualize defaults).
+
+## Update 2026-02-16 (close-loop action/state sync validation + single-env guard)
+
+### Added
+- `minimal_rap_bridge/check_policy_action_replay_consistency.py`
+  - verifies that replaying recorded native-policy actions through `env.step(actions)` reproduces the same simulator states.
+
+### Validation Criteria Implemented
+1. Action log parity (`compare_action_logs.py`)
+   - compares: `ego_slot`, `ego_id`, `ego_action`, `action_count`, `action_sum`, `action_crc32`
+   - `action_crc32` is over the full action tensor bytes per step (all controlled slots).
+   - pass condition:
+     - `row_count_match=True`
+     - `mismatch_rows=0`
+
+2. State replay parity (`check_policy_action_replay_consistency.py`)
+   - pass A: run `step_native_policy()` and record exact action tensors + post-step checksums.
+   - pass B: reset same env/seed and replay exact tensors via `env.step(actions)`.
+   - compare post-step state checksums over all slots for:
+     - `id`, `x`, `y`, `heading`, `length`, `width`
+   - pass condition:
+     - `all_steps_match=True`
+     - `num_mismatch_steps=0`
+
+### Single-Env Parity Guard
+- `minimal_rap_bridge/run_native_policy_pipeline.sh` now:
+  - defaults to `--num-agents 21` (single-env for this map/config),
+  - probes `Drive.num_envs` before running,
+  - exits if `num_envs > 1` to prevent merged multi-sim artifacts.
+
+### Interpreting Current “Looks Wrong” Reports
+- If both parity checks pass, action computation and exposed global state transitions are consistent.
+- Remaining visual mismatch is usually from:
+  - native `./visualize` camera/view behavior vs RAP sensor camera model,
+  - run-config mismatch (map/source video horizon/settings),
+  - fields not covered by `get_global_agent_state` checksum.

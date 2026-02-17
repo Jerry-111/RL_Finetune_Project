@@ -235,7 +235,7 @@ python minimal_rap_bridge/compare_state_vs_rap_baseline.py \
   --seed 1 \
   --map-dir resources/drive/binaries \
   --num-maps 1 \
-  --num-agents 32 \
+  --num-agents 21 \
   --cameras CAM_F0,CAM_L0,CAM_R0 \
   --panel-camera CAM_F0 \
   --ego-select-mode native_visualize \
@@ -285,6 +285,45 @@ Outputs under `--out-root` include:
 
 Use `--skip-action-check` to disable action-log comparison.
 Use `--skip-strip-video` to disable stitched RAP strip video generation.
+
+### Action/State Sync Criteria (what is checked)
+
+Action consistency is validated in two layers:
+
+1) Action log parity (`compare_action_logs.py`)
+- compares per-transition rows from reference native loop vs RAP render loop:
+  - `ego_slot`, `ego_id`, `ego_action`, `action_count`, `action_sum`, `action_crc32`
+- `action_crc32` is computed over the full action tensor bytes for that step, so any slot/action difference fails parity.
+- Pass condition:
+  - `row_count_match=True`
+  - `mismatch_rows=0`
+
+2) Action replay state parity (`check_policy_action_replay_consistency.py`)
+- pass A: run native policy closed-loop and record exact action tensors + post-step global-state checksum.
+- pass B: reset same env/seed, replay recorded action tensors through `env.step(actions)`, compare post-step checksums.
+- state checksum covers all slots for:
+  - `id`, `x`, `y`, `heading`, `length`, `width`
+- Pass condition:
+  - `all_steps_match=True`
+  - `num_mismatch_steps=0`
+
+Run the state-parity checker:
+
+```bash
+./.venv-pufferdrive-rap/bin/python minimal_rap_bridge/check_policy_action_replay_consistency.py \
+  --frames 80 \
+  --episode-length 120 \
+  --seed 1 \
+  --map-dir resources/drive/binaries \
+  --num-maps 1 \
+  --num-agents 21 \
+  --control-mode control_vehicles \
+  --init-mode create_all_valid \
+  --ego-select-mode native_visualize \
+  --policy-path resources/drive/puffer_drive_weights.bin \
+  --out-report /tmp/pd_action_replay_consistency_report.txt \
+  --out-csv /tmp/pd_action_replay_consistency.csv
+```
 
 If ego identity still mismatches native, lock ego explicitly:
 
@@ -417,8 +456,8 @@ Outputs:
 
 - Policy mismatch (motion source):
   - Native `./visualize` advances with policy inference each step (`forward(net, obs) -> actions`, then step).
-  - This bridge does not run the native policy path; it advances with `env.step(actions)` using neutral or replayed actions/states.
-  - Expect traffic differences to grow over time even if frame 0 matches well.
+  - Baseline bridge now supports native policy stepping (`--control-source native_policy`) and action/state parity checks.
+  - Visual differences can still appear if run configs differ (map choice, seed, control/init mode, agent count) or due to camera/view differences.
 - Camera mismatch:
   - Native `--view agent` is a chase camera.
   - RAP `CAM_F0` is a fixed sensor-style camera with its own extrinsics/intrinsics.
