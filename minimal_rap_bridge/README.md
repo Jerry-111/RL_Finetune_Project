@@ -25,7 +25,14 @@ Long-form notes and handoff logs are in `minimal_rap_bridge/docs/`:
 
 - Use `run_native_policy_pipeline.sh` if you want an end-to-end workflow with outputs ready for review.
 - Use baseline Python scripts for targeted debugging or custom experiments.
-- Use legacy scripts (`render_pufferdrive_to_rap.py`, `compare_state_vs_rap.py`) only when you specifically need extra debug knobs.
+- Use legacy/debug scripts only when you specifically need older or exploratory tooling.
+
+## Folder Layout
+
+- Root (`minimal_rap_bridge/`): active scripts used by current parity workflow.
+- `minimal_rap_bridge/legacy/`: older bridge scripts kept for reference.
+- `minimal_rap_bridge/debug/`: helper utilities for sweeps/auxiliary video generation.
+- `minimal_rap_bridge/docs/`: reports, handoffs, and logic/interface notes.
 
 ## Prerequisites
 
@@ -203,10 +210,10 @@ bash minimal_rap_bridge/run_native_policy_pipeline.sh \
 | `log_native_policy_actions_reference.py` | Reference action logging | Pipeline internals / debugging |
 | `compare_action_logs.py` | Action parity report | Verify loop consistency |
 | `check_policy_action_replay_consistency.py` | Action replay -> state parity checker | Deterministic parity audit |
-| `render_pufferdrive_to_rap.py` | Legacy full-feature bridge script | Advanced debugging only |
-| `compare_state_vs_rap.py` | Legacy full-feature compare script | Advanced debugging only |
-| `sweep_scene_visualize.py` | Multi-seed sweep + overview image | Coverage/sparsity analysis |
-| `make_seed_videos.py` | Video export from sweep folders | Presentation / QA playback |
+| `render_pufferdrive_to_rap.py` | Shared core + legacy full-feature bridge script | Baseline dependency / advanced debugging |
+| `legacy/compare_state_vs_rap.py` | Legacy full-feature compare script | Advanced debugging only |
+| `debug/sweep_scene_visualize.py` | Multi-seed sweep + overview image | Coverage/sparsity analysis |
+| `debug/make_seed_videos.py` | Video export from sweep folders | Presentation / QA playback |
 
 ## Common Pitfalls
 
