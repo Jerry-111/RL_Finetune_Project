@@ -9,10 +9,17 @@ The goal for most users is simple:
 
 ## Status (as of February 16, 2026)
 
-Based on `minimal_rap_bridge/PROJECT_PROGRESS_REPORT_2026-02-16.md` and `minimal_rap_bridge/DEBUG_HANDOFF.md`:
+Based on `minimal_rap_bridge/docs/PROJECT_PROGRESS_REPORT_2026-02-16.md` and `minimal_rap_bridge/docs/DEBUG_HANDOFF.md`:
 - Native-policy action parity is passing in the validated single-env setup.
 - Exposed global-state replay parity is also passing in that same setup.
 - Visual output is useful for geometry/identity sanity, not pixel-equivalence with native `./visualize`.
+
+## Bridge Docs Folder
+
+Long-form notes and handoff logs are in `minimal_rap_bridge/docs/`:
+- `DEBUG_HANDOFF.md`
+- `PROJECT_PROGRESS_REPORT_2026-02-16.md`
+- `SIMULATION_LOGIC_NOTES.md`
 
 ## Who Should Use What
 
@@ -220,5 +227,6 @@ bash minimal_rap_bridge/run_native_policy_pipeline.sh \
 
 ## Additional References
 
-- `minimal_rap_bridge/DEBUG_HANDOFF.md`: chronological debug findings and root causes.
-- `minimal_rap_bridge/PROJECT_PROGRESS_REPORT_2026-02-16.md`: parity milestones and roadmap.
+- `minimal_rap_bridge/docs/DEBUG_HANDOFF.md`: chronological debug findings and root causes.
+- `minimal_rap_bridge/docs/PROJECT_PROGRESS_REPORT_2026-02-16.md`: parity milestones and roadmap.
+- `minimal_rap_bridge/docs/SIMULATION_LOGIC_NOTES.md`: termination/collision/multi-env/trajectory logic notes.
