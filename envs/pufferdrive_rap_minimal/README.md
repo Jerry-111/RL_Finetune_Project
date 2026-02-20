@@ -88,4 +88,4 @@ python minimal_rap_bridge/render_pufferdrive_to_rap.py \
 - Native extensions are built in-place with:
   - `python setup.py build_ext --inplace --force`
 - Headless visualizer tools (`xvfb`, `xauth`, `ffmpeg`) are still system-level (apt) concerns; see:
-  - `docs/src/custom/cluster-headless-setup.md`
+  - `minimal_rap_bridge/docs/cluster-headless-setup.md`

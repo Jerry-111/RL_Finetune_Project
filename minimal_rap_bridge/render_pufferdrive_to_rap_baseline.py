@@ -139,6 +139,9 @@ def parse_args() -> BridgeConfig:
         policy_path=args.policy_path,
         actions_log_path=args.actions_log,
         hide_respawned_agents=(not args.show_respawned_agents),
+        timing_csv_path=None,
+        scene_summary_json_path=None,
+        profile_render_write_only=False,
     )
 
 

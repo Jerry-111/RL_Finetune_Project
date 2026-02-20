@@ -12,6 +12,8 @@ echo "[setup] map dir for Drive validation: ${MAP_DIR}"
 python -m venv "${VENV_PATH}"
 source "${VENV_PATH}/bin/activate"
 
+# Ensure pip exists even in minimal/system images where venv lacks it.
+python -m ensurepip --upgrade
 python -m pip install --upgrade pip setuptools wheel
 
 echo "[setup] installing pufferlib in editable mode (minimal train deps)..."

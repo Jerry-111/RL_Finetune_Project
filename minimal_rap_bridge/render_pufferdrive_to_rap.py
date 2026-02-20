@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import struct
 import sys
+import time
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,7 +35,7 @@ if str(RAP_ROOT) not in sys.path:
     sys.path.insert(0, str(RAP_ROOT))
 
 from pufferlib.ocean.drive.drive import Drive  # noqa: E402
-from process_data.helpers.renderer import ScenarioRenderer  # noqa: E402
+from process_data.helpers.renderer import ScenarioRenderer, camera_params  # noqa: E402
 import cv2  # noqa: E402
 
 
@@ -68,6 +70,9 @@ class BridgeConfig:
     policy_path: str
     actions_log_path: Path | None
     hide_respawned_agents: bool
+    timing_csv_path: Path | None
+    scene_summary_json_path: Path | None
+    profile_render_write_only: bool
 
 
 @dataclass
@@ -295,10 +300,32 @@ def parse_args() -> BridgeConfig:
         action="store_true",
         help="Do not hide agents that have respawned (native visualize hides them by default)",
     )
+    parser.add_argument(
+        "--timing-csv",
+        type=Path,
+        default=None,
+        help="Optional CSV path to save per-frame render/write timing",
+    )
+    parser.add_argument(
+        "--scene-summary-json",
+        type=Path,
+        default=None,
+        help="Optional JSON path to save scene-level timing summary",
+    )
+    parser.add_argument(
+        "--profile-render-write-only",
+        action="store_true",
+        help="When set, scene total timing excludes setup/env-step overhead and uses render+write only",
+    )
     args = parser.parse_args()
     cameras = [c.strip() for c in args.cameras.split(",") if c.strip()]
     if not cameras:
         raise ValueError("At least one camera must be provided via --cameras")
+    invalid_cameras = [c for c in cameras if c not in camera_params]
+    if invalid_cameras:
+        valid = ",".join(sorted(camera_params.keys()))
+        invalid = ",".join(invalid_cameras)
+        raise ValueError(f"Invalid camera ids: {invalid}. Valid camera ids are: {valid}")
     if args.frames <= 0:
         raise ValueError("--frames must be > 0")
     if args.episode_length < args.frames:
@@ -334,6 +361,9 @@ def parse_args() -> BridgeConfig:
         policy_path=args.policy_path,
         actions_log_path=args.actions_log,
         hide_respawned_agents=(not args.show_respawned_agents),
+        timing_csv_path=args.timing_csv,
+        scene_summary_json_path=args.scene_summary_json,
+        profile_render_write_only=args.profile_render_write_only,
     )
 
 
@@ -896,6 +926,28 @@ def print_qa_summary(qa: QaAccumulator, frames: int) -> None:
     )
 
 
+def summarize_timing_ms(frame_total_ms: Sequence[float]) -> Dict[str, float]:
+    arr = np.array(frame_total_ms, dtype=np.float64)
+    if arr.size == 0:
+        return {
+            "min_frame_ms": 0.0,
+            "p50_frame_ms": 0.0,
+            "mean_frame_ms": 0.0,
+            "p95_frame_ms": 0.0,
+            "max_frame_ms": 0.0,
+            "fps_equiv": 0.0,
+        }
+    mean_ms = float(np.mean(arr))
+    return {
+        "min_frame_ms": float(np.min(arr)),
+        "p50_frame_ms": float(np.percentile(arr, 50)),
+        "mean_frame_ms": mean_ms,
+        "p95_frame_ms": float(np.percentile(arr, 95)),
+        "max_frame_ms": float(np.max(arr)),
+        "fps_equiv": (1000.0 / mean_ms) if mean_ms > 0.0 else 0.0,
+    }
+
+
 def infer_neutral_discrete_action(env: Drive) -> int:
     """Return a neutral discrete action index for current dynamics model."""
     if getattr(env, "dynamics_model", "classic") == "jerk":
@@ -1026,7 +1078,11 @@ def run_bridge(cfg: BridgeConfig) -> None:
                 replay_states_full = capture_rollout_states(env, cfg.frames)
             replay_states = [slice_state_to_env(s, ego_slice_start, ego_slice_end) for s in replay_states_full]
             if cfg.replay_source != "ground_truth":
-                gt_heading_lookup = build_ground_truth_heading_lookup(env, cfg.frames, state_ref=replay_states[0])
+                try:
+                    gt_heading_lookup = build_ground_truth_heading_lookup(env, cfg.frames, state_ref=replay_states[0])
+                except Exception as e:
+                    gt_heading_lookup = None
+                    print(f"[warn] failed to build GT heading lookup; continuing without correction: {e}")
             state_ref = replay_states[0]
         else:
             state_ref = state0
@@ -1113,6 +1169,12 @@ def run_bridge(cfg: BridgeConfig) -> None:
             except Exception as e:
                 print(f"[warn] failed to parse lane polylines from {map_bin_path}: {e}")
         print(f"Lane source polylines: {len(lane_polylines_abs)}")
+        timing_enabled = bool(cfg.timing_csv_path is not None or cfg.scene_summary_json_path is not None)
+        timing_rows: List[Dict[str, float | int]] = []
+        frame_render_ms: List[float] = []
+        frame_write_ms: List[float] = []
+        frame_total_ms: List[float] = []
+        scene_loop_start = time.perf_counter()
         current_ego_idx = resolve_ego_index_by_id(state_ref, ego_id=ego_id, preferred_fallback=ego_idx)
         last_ego_x = float(state_ref["x"][current_ego_idx])
         last_ego_y = float(state_ref["y"][current_ego_idx])
@@ -1185,8 +1247,29 @@ def run_bridge(cfg: BridgeConfig) -> None:
                 ego_heading=camera_yaw,
                 flip_lateral_axis=cfg.flip_lateral_axis,
             )
+            render_t0 = time.perf_counter() if timing_enabled else 0.0
             rendered = renderer.observe(scenario)
+            render_t1 = time.perf_counter() if timing_enabled else 0.0
+            save_t0 = time.perf_counter() if timing_enabled else 0.0
             save_frame_images(cfg.out_dir, t, rendered)
+            save_t1 = time.perf_counter() if timing_enabled else 0.0
+            if timing_enabled:
+                render_ms = (render_t1 - render_t0) * 1000.0
+                write_ms = (save_t1 - save_t0) * 1000.0
+                total_ms = render_ms + write_ms
+                frame_render_ms.append(render_ms)
+                frame_write_ms.append(write_ms)
+                frame_total_ms.append(total_ms)
+                timing_rows.append(
+                    {
+                        "frame_idx": int(t),
+                        "render_ms": float(render_ms),
+                        "write_ms": float(write_ms),
+                        "frame_total_ms": float(total_ms),
+                        "map_feature_count": int(len(map_features)),
+                        "box_count": int(scenario["anns"]["gt_boxes_world"].shape[0]),
+                    }
+                )
             nonzero_counts = get_nonzero_counts(rendered)
             log_nonzero_counts(t, nonzero_counts)
             update_qa_accumulator(
@@ -1221,6 +1304,55 @@ def run_bridge(cfg: BridgeConfig) -> None:
                 else:
                     step_env_with_zeros(env)
         print_qa_summary(qa, cfg.frames)
+        scene_loop_end = time.perf_counter()
+        if timing_enabled:
+            if cfg.timing_csv_path is not None:
+                cfg.timing_csv_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(cfg.timing_csv_path, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(
+                        f,
+                        fieldnames=[
+                            "frame_idx",
+                            "render_ms",
+                            "write_ms",
+                            "frame_total_ms",
+                            "map_feature_count",
+                            "box_count",
+                        ],
+                    )
+                    writer.writeheader()
+                    for row in timing_rows:
+                        writer.writerow(row)
+                print(f"Timing CSV: {cfg.timing_csv_path}")
+
+            timing_stats = summarize_timing_ms(frame_total_ms)
+            total_ms = float(sum(frame_total_ms))
+            if not cfg.profile_render_write_only:
+                total_ms = float((scene_loop_end - scene_loop_start) * 1000.0)
+
+            scene_summary = {
+                "map_id": ego_map_id,
+                "scenario_id": sid,
+                "frames": int(cfg.frames),
+                "total_ms": total_ms,
+                **timing_stats,
+                "sum_render_ms": float(sum(frame_render_ms)),
+                "sum_write_ms": float(sum(frame_write_ms)),
+                "profile_render_write_only": bool(cfg.profile_render_write_only),
+                "timing_csv_path": str(cfg.timing_csv_path) if cfg.timing_csv_path is not None else None,
+                "output_dir": str(cfg.out_dir),
+            }
+            print(
+                "[timing] "
+                f"frames={scene_summary['frames']} total_ms={scene_summary['total_ms']:.3f} "
+                f"mean_frame_ms={scene_summary['mean_frame_ms']:.3f} "
+                f"p95_frame_ms={scene_summary['p95_frame_ms']:.3f} fps_equiv={scene_summary['fps_equiv']:.3f}"
+            )
+            if cfg.scene_summary_json_path is not None:
+                cfg.scene_summary_json_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(cfg.scene_summary_json_path, "w", encoding="utf-8") as f:
+                    json.dump(scene_summary, f, indent=2)
+                print(f"Scene summary JSON: {cfg.scene_summary_json_path}")
 
     finally:
         if "action_log_file" in locals() and action_log_file is not None:

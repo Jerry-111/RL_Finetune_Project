@@ -56,6 +56,12 @@ source .venv-pufferdrive-rap/bin/activate
 python envs/pufferdrive_rap_minimal/validate_env.py --check-drive --map-dir resources/drive/binaries
 ```
 
+Alternative one-command bootstrap from this folder:
+
+```bash
+bash minimal_rap_bridge/setup_cluster_env.sh
+```
+
 ## Recommended Quickstart (One Command)
 
 If you already have a native agent video (`.mp4`), run:
@@ -98,6 +104,60 @@ python minimal_rap_bridge/render_pufferdrive_to_rap_baseline.py \
 ```
 
 This writes `frame_XXXX_<CAM>.jpg` files and prints per-frame nonzero pixel counts plus a QA summary at the end.
+
+## Renderer Throughput Profiling
+
+Use `profile_rap_renderer_speed.py` to benchmark RAP rendering throughput across fixed map ids.
+
+What it does:
+- Stages deterministic one-map directories under `/tmp/rap_profile_maps/map_XXX/`.
+- Runs `render_pufferdrive_to_rap.py` for each requested map.
+- Renders all 8 camera views:
+  - `CAM_F0,CAM_L0,CAM_L1,CAM_L2,CAM_R0,CAM_R1,CAM_R2,CAM_B0`
+- Writes per-frame timing CSV and per-scene summary JSON.
+- Writes combined aggregate summaries (`profile_summary.csv` / `.json`).
+
+Timing definition:
+- Per-frame timing is `renderer.observe(...) + JPEG write`.
+- Scene total uses render+write accumulation (`--profile-render-write-only`).
+
+Stability note:
+- In some builds, replay modes can crash native code.
+- The profiling script therefore runs with replay off and neutral-action stepping for stable throughput measurement.
+
+Smoke test (1 map, 5 frames):
+
+```bash
+python minimal_rap_bridge/profile_rap_renderer_speed.py \
+  --map-root resources/drive/binaries/validation \
+  --map-ids 0 \
+  --frames 5 \
+  --episode-length 10 \
+  --out-root /tmp/rap_renderer_profile_smoke \
+  --clean-stage-root
+```
+
+Full requested run (5 maps x 91 frames):
+
+```bash
+python minimal_rap_bridge/profile_rap_renderer_speed.py \
+  --map-root resources/drive/binaries/validation \
+  --map-ids 0,1,2,3,4 \
+  --frames 91 \
+  --episode-length 120 \
+  --out-root /tmp/rap_renderer_profile \
+  --clean-stage-root
+```
+
+Outputs:
+- Per-scene:
+  - `/tmp/rap_renderer_profile/map_XXX/frames/frame_XXXX_<CAM>.jpg`
+  - `/tmp/rap_renderer_profile/map_XXX/timing.csv`
+  - `/tmp/rap_renderer_profile/map_XXX/scene_summary.json`
+  - `/tmp/rap_renderer_profile/map_XXX/run.log`
+- Aggregate:
+  - `/tmp/rap_renderer_profile/profile_summary.csv`
+  - `/tmp/rap_renderer_profile/profile_summary.json`
 
 ## What This Pipeline Runs
 
