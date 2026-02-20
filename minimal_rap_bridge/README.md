@@ -149,6 +149,18 @@ python minimal_rap_bridge/profile_rap_renderer_speed.py \
   --clean-stage-root
 ```
 
+Example run (10 manually picked random-ish maps, excluding the first 10):
+
+```bash
+python minimal_rap_bridge/profile_rap_renderer_speed.py \
+  --map-root resources/drive/binaries/validation \
+  --map-ids 12,19,27,34,41,48,56,63,70,74 \
+  --frames 91 \
+  --episode-length 120 \
+  --out-root /tmp/rap_renderer_profile_10random \
+  --clean-stage-root
+```
+
 Outputs:
 - Per-scene:
   - `/tmp/rap_renderer_profile/map_XXX/frames/frame_XXXX_<CAM>.jpg`
